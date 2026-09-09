@@ -303,12 +303,13 @@ local function schedule_loop()
     util.log("WARN: no repeating timer API; scan runs once at startup only")
 end
 
--- Fast, light loop: pokes the native trigger + reaps the bridge response while a
--- native order is in flight. A no-op (single nil check) when nothing is pending,
--- so it is safe to run at ~1.5 Hz without touching the game thread otherwise.
+-- Pokes the native trigger + reaps the bridge response while a native order is in
+-- flight. When nothing is pending the async callback only reads one Lua field and
+-- returns -- it never hops to the game thread, so an idle server pays nothing.
 local function schedule_native_poll()
     if type(engine.native_tick) ~= "function" then return end
-    local function tick_once()
+    local function pump()
+        if not engine._native_pending then return end
         if type(ExecuteInGameThread) == "function" then
             ExecuteInGameThread(function() pcall(engine.native_tick) end)
         else
@@ -316,10 +317,10 @@ local function schedule_native_poll()
         end
     end
     if type(LoopAsync) == "function" then
-        LoopAsync(650, function() tick_once(); return false end)
-        util.log("native poll: LoopAsync every 650ms")
+        LoopAsync(650, function() pump(); return false end)
+        util.log("native poll: LoopAsync every 650ms (game thread only while pending)")
     elseif type(ExecuteWithDelay) == "function" then
-        local function again() tick_once(); ExecuteWithDelay(650, again) end
+        local function again() pump(); ExecuteWithDelay(650, again) end
         ExecuteWithDelay(650, again)
     end
 end

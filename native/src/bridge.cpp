@@ -40,7 +40,10 @@
 
 static constexpr uint32_t kMaxArchiveBytes = 512;
 static constexpr uint32_t kMaxParamsBytes  = 256;
-static constexpr DWORD    kPollIntervalMs  = 2;
+// Idle poll cadence. Kept slow: heavy INI polling on the Wine/overlay filesystem
+// was starving the game thread's save/join I/O. Native orders tolerate ~1s latency
+// (the Lua side pokes on a 650ms timer anyway).
+static constexpr DWORD    kPollIntervalMs  = 120;
 
 // ---------------------------------------------------------------- UE4SS ABI
 
@@ -144,13 +147,15 @@ static bool init_paths() {
 static void write_atomic(const wchar_t* path, const char* text) {
     wchar_t tmp[MAX_PATH * 2];
     _snwprintf_s(tmp, _TRUNCATE, L"%ls.tmp", path);
+    // No WRITE_THROUGH / FlushFileBuffers: forcing a disk sync here (many times a
+    // minute, on the Wine overlay fs) was part of what starved game-thread I/O.
     HANDLE h = CreateFileW(tmp, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
     DWORD want = (DWORD)strlen(text), got = 0;
-    bool ok = WriteFile(h, text, want, &got, nullptr) && got == want && FlushFileBuffers(h);
+    bool ok = WriteFile(h, text, want, &got, nullptr) && got == want;
     CloseHandle(h);
-    if (ok) MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    if (ok) MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING);
     else DeleteFileW(tmp);
 }
 
@@ -315,6 +320,20 @@ static bool ensure_trigger(void* trigger, const char** err) {
 
 static void handle_request() {
     bool ok = false;
+
+    // Cheap gate: only parse the ini when its mtime/size changed since last look.
+    // Avoids ~10 GetPrivateProfile* file opens per poll on the Wine overlay fs.
+    static FILETIME s_last_write = {};
+    static LONGLONG s_last_size = -1;
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExW(g_request_path, GetFileExInfoStandard, &fad)) return;
+    LONGLONG sz = ((LONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+    if (fad.ftLastWriteTime.dwLowDateTime == s_last_write.dwLowDateTime
+        && fad.ftLastWriteTime.dwHighDateTime == s_last_write.dwHighDateTime
+        && sz == s_last_size) return;
+    s_last_write = fad.ftLastWriteTime;
+    s_last_size = sz;
+
     if (GetPrivateProfileIntW(L"request", L"complete", 0, g_request_path) != 1) return;
 
     uint64_t rid = ini_u64(L"request_id", 10, &ok);
@@ -395,8 +414,12 @@ static DWORD WINAPI worker(LPVOID) {
     while (WaitForSingleObject(g_stop_event, kPollIntervalMs) == WAIT_TIMEOUT) {
         reap_done();
         handle_request();
-        // refresh the status file ~1x/sec so counters are observable even while armed
-        if ((++tick % 500) == 0) {
+        // refresh the status file every ~3s while armed/executing so counters are
+        // observable; while fully idle, back off to ~every 30s.
+        ++tick;
+        PendingState psn = g_pending_state.load();
+        uint32_t every = (psn == PendingState::Idle) ? 250u : 25u;   // *120ms
+        if ((tick % every) == 0) {
             PendingState ps = g_pending_state.load();
             const char* s = ps == PendingState::Idle ? "ready"
                           : ps == PendingState::Armed ? "call-armed"
@@ -430,29 +453,23 @@ static bool resolve_symbols(Fn_CppUserModCtor* ctor) {
         return false;
     }
 
-    struct { const char* name; void** slot; } wanted[] = {
-        { kSym_Ctor,            reinterpret_cast<void**>(ctor)                 },
-        { kSym_Dtor,            reinterpret_cast<void**>(&g_dtor)              },
-        { kSym_ProcessEvent,    reinterpret_cast<void**>(&g_process_event)     },
-        { kSym_RegisterPreHook, reinterpret_cast<void**>(&g_register_pre_hook) },
-        { kSym_UnregisterHook,  reinterpret_cast<void**>(&g_unregister_hook)   },
-    };
-    int resolved = 0;
-    const char* first_missing = nullptr;
-    for (auto& w : wanted) {
-        *w.slot = reinterpret_cast<void*>(GetProcAddress(g_ue4ss, w.name));
-        if (*w.slot) ++resolved;
-        else if (!first_missing) first_missing = w.name;
-    }
+    // The three we actually call. ctor/dtor are resolved too (sanity) but optional.
+    g_process_event     = reinterpret_cast<Fn_ProcessEvent>(GetProcAddress(g_ue4ss, kSym_ProcessEvent));
+    g_register_pre_hook = reinterpret_cast<Fn_RegisterPreHook>(GetProcAddress(g_ue4ss, kSym_RegisterPreHook));
+    g_unregister_hook   = reinterpret_cast<Fn_UnregisterHook>(GetProcAddress(g_ue4ss, kSym_UnregisterHook));
+    if (ctor)  *ctor  = reinterpret_cast<Fn_CppUserModCtor>(GetProcAddress(g_ue4ss, kSym_Ctor));
+    g_dtor = reinterpret_cast<Fn_CppUserModDtor>(GetProcAddress(g_ue4ss, kSym_Dtor));
 
-    const bool sha_in_path = dll_path_contains(g_ue4ss, PALCOMMAND_UE4SS_SHA);
-    if (resolved != 5) {
-        _snprintf_s(g_resolve_detail, _TRUNCATE, "symbols %d/5 missing:%.180s",
-                    resolved, first_missing ? first_missing : "?");
+    const char* missing = !g_process_event ? "ProcessEvent"
+                        : !g_register_pre_hook ? "RegisterPreHook"
+                        : !g_unregister_hook ? "UnregisterHook" : nullptr;
+    if (missing) {
+        _snprintf_s(g_resolve_detail, _TRUNCATE, "missing export: %s", missing);
         return false;
     }
-    _snprintf_s(g_resolve_detail, _TRUNCATE, "symbols 5/5 sha-path:%s",
-                sha_in_path ? "match" : "unverified(ok)");
+    const bool sha_in_path = dll_path_contains(g_ue4ss, PALCOMMAND_UE4SS_SHA);
+    _snprintf_s(g_resolve_detail, _TRUNCATE, "ok sha-path:%s ctor:%s",
+                sha_in_path ? "match" : "unverified", (ctor && *ctor) ? "y" : "n");
     return true;
 }
 
@@ -467,11 +484,14 @@ extern "C" __declspec(dllexport) void* start_mod() {
         return nullptr;
     }
 
-    // A CppUserModBase-shaped object so UE4SS's virtual calls (on_update, ...) land
-    // on the exported base's empty defaults. 4 KiB is far more than the real size.
-    g_mod_object = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4096);
-    if (!g_mod_object) { write_status("disabled", 0, "alloc-failed"); return nullptr; }
-    ctor(g_mod_object);
+    // We deliberately do NOT hand UE4SS a CppUserModBase object. Faking that vtable
+    // is fragile and unnecessary: everything we need (RegisterPreHook, ProcessEvent)
+    // is a plain export. Pin the DLL so the code + worker thread survive even if
+    // UE4SS unloads us for returning null, then run entirely from the worker thread
+    // and the on-demand game-thread pre-hook.
+    HMODULE pin = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                       reinterpret_cast<LPCWSTR>(&start_mod), &pin);
 
     InitializeCriticalSection(&g_lock);
     g_lock_ready = true;
@@ -480,9 +500,9 @@ extern "C" __declspec(dllexport) void* start_mod() {
     g_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (g_stop_event) g_worker = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
     if (!g_worker) write_status("disabled", 0, "worker-thread-failed");
-    else write_status("ready", 0, "started");
+    else write_status("ready", 0, "started-detached");
 
-    return g_mod_object;
+    return nullptr;   // not a real CppUserModBase -- no virtuals will be called on garbage
 }
 
 extern "C" __declspec(dllexport) void uninstall_mod(void* mod) {
