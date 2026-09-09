@@ -40,6 +40,7 @@ local ini = util.parse_ini(PATHS.config)
 local CFG = {
     enabled = util.as_bool(ini.enabled, true),
     scan_interval = util.as_int(ini.scanintervalseconds, 20, 5, 3600),
+    idle_scan_interval = util.as_int(ini.idlescanintervalseconds, 120, 10, 7200),
     max_orders_per_flush = util.as_int(ini.maxordersperflush, 8, 1, 64),
     default_transport = util.as_bool(ini.defaulttransporttostorage, true),
     include_guild = util.as_bool(ini.includeguildchest, true),
@@ -60,6 +61,7 @@ local S = {
     scanning = false,
     handle_loop = nil,
     seq = 0,
+    lastOrderAt = 0,            -- os.time() of the last ingested order / cancel (drives scan pacing)
 }
 
 local function persist_queue()
@@ -189,6 +191,7 @@ local function ingest_orders()
             if sel == nil then sel = raw_order.target or raw_order.recipe or raw_order.id end
             local r = cancel_orders(sel)
             util.log(string.format("cancel '%s' -> %d queued, %d placed", tostring(sel), r.queued, r.placed))
+            S.lastOrderAt = os.time()
         else
             local o = rules.normalize_order(raw_order)
             if o then
@@ -205,6 +208,7 @@ local function ingest_orders()
     util.write_file(PATHS.orders, "[]")
     if added > 0 then
         util.log("ingested " .. added .. " immediate order(s)")
+        S.lastOrderAt = os.time()
         persist_queue()
     end
 end
@@ -317,7 +321,7 @@ local function scan_cycle(reason, light)
     S.lastScanAt = os.time()
     local success, err = xpcall(function()
         local stations = discovery.stations()
-        write_stations(stations)
+        local recent_n0 = #S.recent
 
         local totals
         if light and S.lastTotals then
@@ -344,6 +348,10 @@ local function scan_cycle(reason, light)
         -- yet (no power / Pal / fuel) as a soft status, never a failure.
         if type(engine.sweep_placed_watch) == "function" then pcall(engine.sweep_placed_watch) end
 
+        -- publish stations. If an order was placed/cancelled this cycle, re-read
+        -- so it shows immediately (not one scan late); otherwise reuse the snapshot.
+        if #S.recent ~= recent_n0 then write_stations() else write_stations(stations) end
+
         S.lastScan = os.date("!%Y-%m-%dT%H:%M:%SZ")
         write_state()
     end, function(e) return debug.traceback(tostring(e), 2) end)
@@ -362,28 +370,49 @@ end
 -- repeating async timer) and hop to the game thread per tick. No game-thread
 -- hooks trigger scans -- doing heavy reflection from a storage/finish-work hook
 -- stalls the game thread and blocks joins.
+-- Dynamic pacing: a short LoopAsync tick decides each time whether a heavy scan
+-- (the game-thread reflection pass) is actually due. ACTIVE cadence when there's
+-- queue activity or a fresh order; IDLE cadence otherwise -- fewer game-thread
+-- passes when nobody's using the app, so it competes less with the game (e.g. the
+-- map-open hitch). The tick itself is cheap: a couple of Lua reads + one tiny file
+-- stat, never a game-thread hop unless a scan is due.
 local function schedule_loop()
-    local delay = CFG.scan_interval * 1000
-    local tick = 0
-    -- full inventory walk every 4th tick; stations + queue only in between
-    local function run_once()
-        tick = tick + 1
-        local light = (tick % 4 ~= 1)
+    local TICK = math.min(10, CFG.scan_interval)          -- loop granularity (s)
+    local ACTIVE = math.max(TICK, CFG.scan_interval)
+    local IDLE = math.max(ACTIVE, CFG.idle_scan_interval)
+    local last_heavy = 0                                  -- os.time() of the last heavy scan
+    local heavy_n = 0
+
+    local function orders_waiting()
+        local raw = util.read_file(PATHS.orders)
+        return raw ~= nil and raw:match("[^%s%[%]]") ~= nil   -- non-empty and not just "[ ]"
+    end
+
+    local function tick_fn()
+        local now = os.time()
+        local active = (#S.queue > 0) or engine._native_pending
+            or (now - (S.lastOrderAt or 0) < math.max(150, ACTIVE * 3))
+            or orders_waiting()
+        if now - last_heavy < (active and ACTIVE or IDLE) then return end
+        last_heavy = now
+        heavy_n = heavy_n + 1
+        local light = (heavy_n % 4 ~= 1)                  -- full inventory every 4th heavy scan
         if type(ExecuteInGameThread) == "function" then
             ExecuteInGameThread(function() scan_cycle("interval", light) end)
         else
             scan_cycle("interval", light)
         end
     end
+
     if type(LoopAsync) == "function" then
-        LoopAsync(delay, function() run_once(); return false end)
-        util.log("scan loop: LoopAsync every " .. CFG.scan_interval .. "s")
+        LoopAsync(TICK * 1000, function() pcall(tick_fn); return false end)
+        util.log(string.format("scan loop: dynamic (tick %ds, active %ds, idle %ds)", TICK, ACTIVE, IDLE))
         return
     end
     if type(ExecuteWithDelay) == "function" then
-        local function again() run_once(); ExecuteWithDelay(delay, again) end
-        ExecuteWithDelay(delay, again)
-        util.log("scan loop: ExecuteWithDelay every " .. CFG.scan_interval .. "s")
+        local function again() pcall(tick_fn); ExecuteWithDelay(TICK * 1000, again) end
+        ExecuteWithDelay(TICK * 1000, again)
+        util.log(string.format("scan loop: dynamic via ExecuteWithDelay (tick %ds)", TICK))
         return
     end
     util.log("WARN: no repeating timer API; scan runs once at startup only")

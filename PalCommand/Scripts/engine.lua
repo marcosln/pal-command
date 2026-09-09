@@ -456,7 +456,7 @@ local function is_idle(s)
         and (tonumber(s.requested) or 0) == 0 and not s.workable
 end
 
---- @param order { recipe, count, transport, baseId?, stationKey? }
+--- @param order { recipe, count, transport, baseId?, target? }  target = mapId / "key#index" / key
 --- @param ctx   { pid, archive? }
 --- @return placed:boolean, detail:string, soft:boolean  (soft = not placed but not a real failure -- keep waiting)
 function M.place(order, ctx)
@@ -464,13 +464,30 @@ function M.place(order, ctx)
     local count = math.max(1, math.floor(tonumber(order.count) or 1))
     local transport = order.transport
     if transport == nil then transport = true end
+    local tgt = order.target or order.stationKey
 
     local candidates = {}
-    for _, s in ipairs(discovery.stations_for(recipe, order.baseId, order.target or order.stationKey)) do
+    for _, s in ipairs(discovery.stations_for(recipe, order.baseId, tgt)) do
         if valid(s.obj) then candidates[#candidates + 1] = s end
     end
     if #candidates == 0 then
         return false, "no station makes '" .. tostring(recipe) .. "'"
+    end
+
+    -- An explicit machine target is a HARD PIN: use only that machine, and if it's
+    -- busy the order WAITS (stays queued, FIFO) -- it never falls through to another.
+    -- The one exception: if the target resolves to no live machine (demolished /
+    -- typo) we degrade to any capable machine rather than wait forever.
+    local pinned = ""
+    if tgt and tgt ~= "" then
+        local only = {}
+        for _, s in ipairs(candidates) do
+            if s.mapId == tgt or s.key == tgt or (s.key .. "#" .. tostring(s.index)) == tgt then
+                only[#only + 1] = s
+            end
+        end
+        if #only > 0 then candidates = only; pinned = " [pinned]"
+        else pinned = " [pin target gone -> any capable]" end
     end
 
     local want = bytes.build(recipe, count, transport)
@@ -492,8 +509,8 @@ function M.place(order, ctx)
                 local pid = select(1, discovery.connected_player_for_station(station.obj)) or anyone
                 local okk, serr = native_submit(station.obj, pid, want, order)
                 if okk then
-                    return false, string.format("native: submitted %s x%d @ %s (station %s) pid=%d -- verifying",
-                        recipe, count, station.baseName, station.key, pid), true
+                    return false, string.format("native: submitted %s x%d @ %s (station %s)%s pid=%d -- verifying",
+                        recipe, count, station.baseName, station.key, pinned, pid), true
                 end
                 if not (ctx and ctx.archive) then return false, "native: " .. tostring(serr) end
                 util.log("native submit failed (" .. tostring(serr) .. "); trying replay")
@@ -504,7 +521,9 @@ function M.place(order, ctx)
             end
         end
         if not (ctx and ctx.archive) then
-            return false, "native: all matching stations busy [" .. tostring(busy_seen) .. "] -- waiting for one to free up", true
+            return false, string.format("native: %s busy [%s] -- waiting%s",
+                pinned ~= "" and "pinned machine" or "all matching stations",
+                tostring(busy_seen), pinned), true
         end
     end
 

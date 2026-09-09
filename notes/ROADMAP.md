@@ -37,19 +37,24 @@ Native backend, works whenever ANY player is online (AFK, never crafts).
       CORRECTION: the earlier "1.4-c: no material for IronIngot" was a misdiagnosis -- IronIngot = "Refined Ingot" = 2x CopperOre + 2x Coal, both plentiful; it stalled on NO FREE PAL, then produced normally once Pals freed up. `CopperOre` is Palworld's internal id for the common grey "Ore" / ES "Mineral de metal", NOT copper. Mod inventory reading was correct throughout. See [[palworld-item-id-quirks]].
       COSMETIC BUG (fix in the next deploy): scan_cycle calls write_stations() BEFORE ingest_orders(), so the published stations.json shows pre-cancel/pre-placement state for one scan (~30s) after any order or cancel. Move write_stations() after the flush, or write it twice. -->
       Full detail: notes/test-1.4-record.md.
-- [ ] 1.5 "Craft X on ALL machines that can" — batch order fan-out
+- [~] 1.5 "Craft X on ALL machines that can" (fan-out) — **DEFERRED** (user 2026-09-09:
+      wants manual per-machine control, not broadcast). Revisit as an optional
+      power-user action after the map/app exist.
 - [ ] 1.6 Stress: full queue (8+), verify drain, timing, and that joins never block
 - [ ] 1.7 Replay fallback still correct when native is off (same-length recipe ids)
-- [ ] 1.8 **Two targeting modes, user-picked per order (user, 2026-09-09):**
-      (a) **PIN** — `target` + `pin:true`: this exact machine only. If it's busy, the
-          order WAITS in a per-machine FIFO sub-queue and places when that machine
-          frees — never falls through to another. Multiple pinned orders for one
-          machine = an ordered backlog on it.
-      (b) **ANY** (default, exists today as a soft `target`): place on the best free
-          capable machine now; `target` (no `pin`) only nudges the choice.
-      Engine: `M.place` respects `pin` (return soft-wait, don't scan other candidates);
-      queue keeps pinned orders in arrival order per `target`. Surfaced in the app
-      (Stage 4) + the map order-sheet (3.4).
+- [x] 1.8 Targeting: an explicit machine `target` is a HARD PIN.
+      <!-- done 2026-09-09 (code, deploy pending): user settled it -- picking a machine
+      means "use THIS machine". engine.M.place: if `target` (mapId / "key#index" / key)
+      resolves to >=1 live machine, restrict candidates to ONLY those; if all busy ->
+      soft-wait (stays queued, retried each scan; FIFO falls out of queue order, and a
+      later order for a free machine still jumps ahead so it doesn't block). If the
+      target resolves to NO live machine (demolished / typo) -> degrade to any capable.
+      No `pin:true` flag -- the target IS the pin. No wait-timeout (user: "sin limite").
+      "ANY machine" = just omit `target`. `baseId` (no `target`) still = soft base
+      preference. Surfaced in the app (Stage 4) + map order-sheet (3.4). -->
+      Also this deploy: dynamic scan pacing (ScanIntervalSeconds active / 
+      IdleScanIntervalSeconds idle -> fewer game-thread passes, lighter on the map-open
+      hitch) + fix the cosmetic bug (stations.json published after ingest now).
 
 ## STAGE 2 — Standing rules polished
 

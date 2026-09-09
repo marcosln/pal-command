@@ -51,9 +51,14 @@ PalCommand switches to `native` automatically.
 ```json
 [{ "recipe": "Pal_crystal_S", "count": 50, "transport": true, "target": "<machine mapId>" }]
 ```
-`target` (optional) pins one machine — its `mapId`, `key#index`, or `key` from
-`stations.json`. If that machine is busy or gone, the order routes to the next
-capable one.
+
+- **`target`** (optional) — pin to one machine: its `mapId`, `"key#index"`, or `key`
+  from `stations.json`. It's a **hard pin**: the order goes to that machine and
+  **waits in its queue if it's busy** (FIFO — several pinned orders stack up and
+  run in order), never falling through to another machine. If the target no longer
+  exists (demolished / typo) the order degrades to any capable machine.
+- **no `target`** — any free capable machine, best-first (idle > already-on-recipe).
+- **`baseId`** (optional) — restrict to one base without pinning a machine.
 
 ### Cancel
 
@@ -94,8 +99,11 @@ re-queued or retried.
 
 ## config.ini
 
-See the file — scan interval, per-flush cap, guild chest toggle, retry cap, and
-optional Cloudflare Worker URL/token for cloud sync.
+See the file. Scan pacing is **dynamic**: `ScanIntervalSeconds` (default 20) while
+there's queue activity or a fresh order, backing off to `IdleScanIntervalSeconds`
+(default 120) when idle — fewer game-thread reflection passes when nobody's using
+the app. Also: per-flush cap, guild chest toggle, retry cap, and optional
+Cloudflare Worker URL/token for cloud sync.
 
 ## License
 
