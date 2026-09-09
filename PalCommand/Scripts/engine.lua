@@ -50,20 +50,24 @@ function M.resolve_layout()
     local trig = ok(function() return StaticFindObject(TRIGGER) end)
     if not fn then return nil, "ChangeRecipe UFunction not found" end
 
+    -- every reflected value must be coerced to a plain number; UE4SS can hand back
+    -- wrapper ("TrivialObject") values that error on arithmetic.
+    local function rnum(f) return tonumber(ok(f)) end
+
     local player_off, archive_off, archive_size, max_end
     pcall(function()
         fn:ForEachProperty(function(p)
             local nm = util.fstr(ok(function() return p:GetFName() end))
-            local off = ok(function() return p:GetOffset() end)
-                or ok(function() return p:GetOffset_Internal() end)
-            local sz = ok(function() return p:GetSize() end)
-                or ok(function() return p:GetPropertySize() end)
+            local off = rnum(function() return p:GetOffset() end)
+                or rnum(function() return p:GetOffset_Internal() end)
+            local sz = rnum(function() return p:GetSize() end)
+                or rnum(function() return p:GetPropertySize() end)
             if off and sz then
                 local e = off + sz
                 if not max_end or e > max_end then max_end = e end
             end
-            if nm == "RequestPlayerId" then player_off = off end
-            if nm == "Archive" then archive_off = off; archive_size = sz end
+            if nm == "RequestPlayerId" and off then player_off = off end
+            if nm == "Archive" and off then archive_off = off; archive_size = sz end
         end)
     end)
     if player_off == nil or archive_off == nil then
@@ -71,13 +75,33 @@ function M.resolve_layout()
     end
 
     -- UFunction ParmsSize: prefer the reflected value, else largest (offset+size),
-    -- else fall back to archive_off + a generous FPalNetArchive size.
-    local parms = ok(function() return fn:GetParmsSize() end)
-        or ok(function() return fn.ParmsSize end)
-        or ok(function() return fn:GetPropertiesSize() end)
+    -- else archive_off + a generous FPalNetArchive size.
+    local parms = rnum(function() return fn:GetParmsSize() end)
+        or rnum(function() return fn.ParmsSize end)
+        or rnum(function() return fn:GetPropertiesSize() end)
     local params_size = parms or max_end or (archive_off + (archive_size or 16))
-    -- round up to 16 and give ProcessEvent a little headroom
     params_size = math.ceil(params_size / 16) * 16
+
+    -- introspect the FPalNetArchive struct itself: its inner fields tell us whether
+    -- Bytes really is the only member (and at offset 0).
+    local archive_fields = {}
+    pcall(function()
+        fn:ForEachProperty(function(p)
+            if util.fstr(ok(function() return p:GetFName() end)) ~= "Archive" then return end
+            local strc = ok(function() return p:GetStruct() end)
+                or ok(function() return p.Struct end)
+                or ok(function() return p:GetPropertyClass() end)
+            if not strc then return end
+            strc:ForEachProperty(function(ip)
+                archive_fields[#archive_fields + 1] = {
+                    name = util.fstr(ok(function() return ip:GetFName() end)),
+                    off = rnum(function() return ip:GetOffset() end) or rnum(function() return ip:GetOffset_Internal() end),
+                    size = rnum(function() return ip:GetSize() end),
+                    class = util.fstr(ok(function() return ip:GetClass():GetFName() end)),
+                }
+            end)
+        end)
+    end)
 
     M._layout = {
         rpc_addr = ok(function() return fn:GetAddress() end),
@@ -89,7 +113,9 @@ function M.resolve_layout()
         params_size = params_size,
         parms_reflected = parms,
         max_end = max_end,
+        archive_fields = archive_fields,
     }
+    util.log("native layout resolved: " .. json.encode(M._layout))
     return M._layout
 end
 
