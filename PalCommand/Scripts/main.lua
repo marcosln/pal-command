@@ -47,6 +47,10 @@ local CFG = {
     worker_url = ini.workerbaseurl or "",
     server_token = ini.servertoken or "",
     replay_hook = util.as_bool(ini.enablereplayhook, true),   -- set false to leave Func pristine for disasm
+    -- DESTRUCTIVE one-shot: "offline_selftest=Pal_crystal_S" fires one pid-0 native
+    -- ChangeRecipe at an idle station ~45s after boot, no connected-player guard.
+    -- Blank = off. Remove after the single test run.
+    offline_selftest = ini.offlineselftest or "",
 }
 
 -- ---------------------------------------------------------------- state
@@ -403,6 +407,16 @@ local function boot()
                         local okk, err = engine.request_callpred(st.obj)
                         util.log("r12b callpred: " .. tostring(okk) .. " " .. tostring(err))
                     end
+                end
+                if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
+            end)
+        end
+        -- DESTRUCTIVE offline self-test (Codex step 2), config-gated, once.
+        if CFG.offline_selftest ~= "" and engine.offline_selftest then
+            ExecuteWithDelay(64000, function()
+                local function go()
+                    util.log("SELFTEST: firing offline_selftest=" .. CFG.offline_selftest)
+                    engine.offline_selftest(CFG.offline_selftest, 1)
                 end
                 if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
             end)

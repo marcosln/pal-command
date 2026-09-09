@@ -305,6 +305,41 @@ function M.request_callpred(station_obj)
     return true
 end
 
+--- One-shot DESTRUCTIVE diagnostic (Codex step 2): fire a native ChangeRecipe at
+--- an idle station with pid 0 and NO connected-player guard. NOT reversible -- if
+--- the game accepts it, a Pal will craft and consume materials. Gated by
+--- config `offline_selftest=<recipe>`; runs once per boot. Logs everything.
+function M.offline_selftest(recipe, count)
+    recipe = tostring(recipe or "")
+    count = math.max(1, math.floor(tonumber(count) or 1))
+    if M._selftest_done then return end
+    M._selftest_done = true
+    if not M.native_ready() then util.log("SELFTEST abort: native backend not ready"); return end
+    if M._native_pending then util.log("SELFTEST abort: native busy"); return end
+
+    local station = discovery.station_for(recipe)
+    if not station or not valid(station.obj) then
+        util.log("SELFTEST abort: no idle station makes '" .. recipe .. "'"); return
+    end
+    local addr = ok(function() return string.format("%X", station.obj:GetAddress()) end) or "?"
+    local s0 = discovery.station_state(station.obj)
+    local idle = (s0.recipe == nil or s0.recipe == "" or s0.recipe == "None")
+        and (tonumber(s0.requested) or 0) == 0 and not s0.workable
+    util.log(string.format(
+        "SELFTEST station=%s base=%s idle=%s BEFORE{recipe=%s req=%s rem=%s workable=%s}",
+        addr, tostring(station.baseName), tostring(idle),
+        tostring(s0.recipe), tostring(s0.requested), tostring(s0.remaining), tostring(s0.workable)))
+    if not idle then util.log("SELFTEST abort: station not idle"); return end
+
+    local want = bytes.build(recipe, count, true)
+    local order = { id = "selftest", recipe = recipe, count = count, transport = true, source = "selftest" }
+    local okk, serr = native_submit(station.obj, 0, want, order)
+    util.log(string.format("SELFTEST native_submit(pid=0, %s x%d) -> %s %s",
+        recipe, count, tostring(okk), tostring(serr or "")))
+    -- native_tick() (already on the 650ms timer) will poke the trigger, reap the
+    -- bridge response, and log "native: ... VERIFIED" or "... station unchanged".
+end
+
 --- Poke the trigger + reap the bridge response. Cheap; safe to call ~1x/sec from
 --- the game thread. Resolves M._native_pending via M._on_result.
 function M.native_tick()
