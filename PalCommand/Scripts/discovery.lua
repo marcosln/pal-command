@@ -215,54 +215,43 @@ local function station_base(st)
 end
 M.station_base = station_base
 
---- Per-machine identity + world position. Palworld regenerates the UObject each
---- restart, but a map object carries a persistent id in the save. Probe several
---- accessors; keep whatever the build exposes.
+--- FGuid {A,B,C,D int32} -> stable 32-hex string.
+local function guid_str(g)
+    if g == nil then return nil end
+    local a = ok(function() return tonumber(g.A) end)
+    local b = ok(function() return tonumber(g.B) end)
+    local c = ok(function() return tonumber(g.C) end)
+    local d = ok(function() return tonumber(g.D) end)
+    if a and b and c and d then
+        return string.format("%08x%08x%08x%08x", a & 0xffffffff, b & 0xffffffff, c & 0xffffffff, d & 0xffffffff)
+    end
+    return nil
+end
+M.guid_str = guid_str
+
+--- Per-machine identity + world position. `InstanceId` (FGuid on
+--- PalMapObjectConcreteModelBase) is persistent across restarts; the world
+--- position comes from the owning actor (`st:GetActor()`).
 local function station_identity(st)
     local id = {}
 
-    -- persistent map-object id (survives restarts)
-    local function guid_str(g)
-        if g == nil then return nil end
-        local a = ok(function() return tonumber(g.A) end)
-        local b = ok(function() return tonumber(g.B) end)
-        local c = ok(function() return tonumber(g.C) end)
-        local d = ok(function() return tonumber(g.D) end)
-        if a and b and c and d then
-            return string.format("%08x%08x%08x%08x", a & 0xffffffff, b & 0xffffffff, c & 0xffffffff, d & 0xffffffff)
+    id.mapId = guid_str(unwrap(ok(function() return st.InstanceId end)))
+           or guid_str(ok(function() return st:GetInstanceId() end))
+    id.modelId = guid_str(unwrap(ok(function() return st.ModelInstanceId end)))
+
+    local actor = ok(function() return st:GetActor() end)
+    if actor and valid(actor) then
+        id.machineType = ok(function() return actor:GetClass():GetFName():ToString() end)
+        local function xyz(v)
+            if v == nil then return nil end
+            local x = ok(function() return tonumber(v.X) end)
+            local y = ok(function() return tonumber(v.Y) end)
+            local z = ok(function() return tonumber(v.Z) end)
+            if x and y then return { x = x, y = y, z = z or 0 } end
         end
-        local s = fstr(g)
-        return (s ~= "" and s) or nil
+        id.pos = xyz(ok(function() return actor:K2_GetActorLocation() end))
+              or xyz(ok(function() return actor:GetActorLocation() end))
     end
-    id.mapId = guid_str(ok(function() return st:GetConcreteModelInstanceId() end))
-           or guid_str(ok(function() return st.MapObjectInstanceId end))
-           or guid_str(ok(function() return st.InstanceId end))
-           or fstr(ok(function() return st:GetMapObjectId() end))
-           or fstr(ok(function() return st.MapObjectId end))
-           or fstr(ok(function() return st.MapObjectIdCache end))
-
-    -- machine type / define id
-    id.machineType = fstr(ok(function() return st.AssignDefineDataId end))
-                 or fstr(ok(function() return st:GetMapObjectId() end))
-                 or fstr(ok(function() return st.ConvertItemDataId end))
-
-    -- world position -> for a map view. Try the model, then any owning actor.
-    local function xyz(v)
-        if v == nil then return nil end
-        local x = ok(function() return tonumber(v.X) end)
-        local y = ok(function() return tonumber(v.Y) end)
-        local z = ok(function() return tonumber(v.Z) end)
-        if x and y then return { x = x, y = y, z = z or 0 } end
-        return nil
-    end
-    id.pos = xyz(ok(function() return st:GetWorldLocation() end))
-          or xyz(ok(function() return st:K2_GetActorLocation() end))
-          or xyz(ok(function() return st:GetComponentLocation() end))
-          or xyz(ok(function()
-                local t = st:GetConcreteModelTransform()
-                return t and t.Translation
-             end))
-          or xyz(ok(function() return st.WorldTransformCache and st.WorldTransformCache.Translation end))
     return id
 end
 M.station_identity = station_identity
@@ -293,6 +282,7 @@ function M.stations()
                     -- stable across restarts: base + its recipe set (object ids regenerate)
                     key = bid .. "|" .. table.concat(sorted, ","),
                     mapId = ident.mapId,
+                    modelId = ident.modelId,
                     pos = ident.pos,
                     machineType = ident.machineType,
                 }
