@@ -434,6 +434,57 @@ function M.dump_convert_api()
     return out
 end
 
+--- One-shot reflection dump of a station: every property (name/type/value) up the
+--- class chain + a set of candidate identity/position getters. For wiring the
+--- per-machine id + world position without guessing.
+function M.probe_station(st)
+    if not valid(st) then return { error = "no station" } end
+    local out = { class = full_name(st), props = {}, getters = {} }
+
+    local function strval(v)
+        v = unwrap(v)
+        if v == nil then return nil end
+        local tv = type(v)
+        if tv == "number" or tv == "boolean" then return v end
+        if tv == "string" then return v end
+        -- struct-ish: try common shapes
+        local x = ok(function() return tonumber(v.X) end)
+        if x then return { X = x, Y = ok(function() return tonumber(v.Y) end), Z = ok(function() return tonumber(v.Z) end) } end
+        local a = ok(function() return tonumber(v.A) end)
+        if a then return { A = a, B = ok(function() return tonumber(v.B) end), C = ok(function() return tonumber(v.C) end), D = ok(function() return tonumber(v.D) end) } end
+        local s = ok(function() return v:ToString() end)
+        if type(s) == "string" then return s end
+        return tostring(v)
+    end
+
+    local cls = ok(function() return st:GetClass() end)
+    local guard = 0
+    while cls and valid(cls) and guard < 12 do
+        guard = guard + 1
+        local cn = fstr(ok(function() return cls:GetFName() end))
+        pcall(function()
+            cls:ForEachProperty(function(prop)
+                local pn = fstr(ok(function() return prop:GetFName() end))
+                local pt = fstr(ok(function() return prop:GetClass():GetFName() end))
+                if pn ~= "" and out.props[pn] == nil then
+                    out.props[pn] = { owner = cn, type = pt, value = strval(ok(function() return st[pn] end)) }
+                end
+            end)
+        end)
+        cls = ok(function() return cls:GetSuperStruct() end) or ok(function() return cls:GetSuperClass() end)
+    end
+
+    for _, g in ipairs({
+        "GetMapObjectId", "GetConcreteModelInstanceId", "GetInstanceId", "GetMapObjectInstanceId",
+        "GetWorldLocation", "K2_GetActorLocation", "GetComponentLocation", "GetActorLocation",
+        "GetConcreteModelActor", "GetActor", "GetOwnerMapObjectModel", "GetMapObjectConcreteModel",
+        "GetBaseCampIdBelongTo", "GetSpawnPointId",
+    }) do
+        out.getters[g] = strval(ok(function() return st[g](st) end))
+    end
+    return out
+end
+
 --- Iterate live (connected) player controllers. cb(pc, ps, pid).
 local function for_each_connected(cb)
     for _, pc in ipairs(util.find_all("PalPlayerController")) do

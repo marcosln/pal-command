@@ -357,6 +357,25 @@ local function boot()
         end)
     end
 
+    -- One-shot: dump one station's full reflection (props + getters) so we can
+    -- wire per-machine id + world position from real names, not guesses. Writes
+    -- data/station-probe.json once. Read-only; safe. (Remove once wired.)
+    if not S.probed and type(ExecuteWithDelay) == "function" then
+        S.probed = true
+        ExecuteWithDelay(16000, function()
+            local function go()
+                local out = {}
+                for _, r in ipairs({ "Pal_crystal_S", "Charcoal" }) do
+                    local st = discovery.station_for(r)
+                    if st and st.obj then out[r] = discovery.probe_station(st.obj) end
+                end
+                util.write_file(ROOT .. "\\data\\station-probe.json", json.encode(out))
+                util.log("station-probe dumped")
+            end
+            if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
+        end)
+    end
+
     -- Optional one-shot RE diagnostics (zero-player autonomy research). Off unless
     -- config DebugDiagnostics=true. The connected-player product does not need them.
     if CFG.debug_diag and type(ExecuteWithDelay) == "function" then
