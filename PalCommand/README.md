@@ -45,8 +45,30 @@ PalCommand switches to `native` automatically.
 ### Immediate order
 
 ```json
-[{ "recipe": "Pal_crystal_S", "count": 50, "transport": true }]
+[{ "recipe": "Pal_crystal_S", "count": 50, "transport": true, "target": "<machine mapId>" }]
 ```
+`target` (optional) pins one machine — its `mapId`, `key#index`, or `key` from
+`stations.json`. If that machine is busy or gone, the order routes to the next
+capable one.
+
+### Cancel
+
+A list entry with a `cancel` field is a cancel directive, not an order:
+
+```json
+[{ "cancel": "Pal_crystal_S" }]     // by recipe id
+[{ "cancel": "<order id>" }]        // by order id
+[{ "cancel": "<machine mapId>" }]   // whatever we set on that machine
+[{ "cancel": "all" }]               // every queued + in-flight order we placed
+```
+Drops matching pending orders, aborts a matching in-flight submit, and clears the
+recipe on any machine **PalCommand** set for a match (never a machine a player set).
+
+### `state.json` result kinds (`recent[]`)
+
+`placed` · `dropped` (gave up after retries) · `cancelled` · `cancel-failed` ·
+`warning` — recipe was set but no Pal is working it (missing materials, furnace
+fuel, or no free work slot); the order is not actually producing.
 
 ### Standing rule
 

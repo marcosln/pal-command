@@ -103,7 +103,59 @@ local function inflight_for(recipe, stations)
     return total
 end
 
+--- Cancel by selector: an order id, a recipe id, a target mapId, or "all"/true.
+-- Drops matching pending orders from the queue, aborts a matching in-flight native
+-- submit, and clears the recipe on any machine we set for a match (never a machine
+-- a player set -- we only touch engine._placed_watch entries). Returns {queued, placed}.
+local function cancel_orders(sel)
+    if sel == true then sel = "all" end
+    sel = tostring(sel or "all")
+    local all = (sel == "" or sel == "all" or sel == "*")
+    local res = { queued = 0, placed = 0 }
+    local is_mapid = sel:match("^%x+$") ~= nil and #sel >= 16
+
+    local function hit(o)
+        return all or o.id == sel or o.recipe == sel or o.target == sel
+    end
+
+    for i = #S.queue, 1, -1 do
+        local q = S.queue[i]
+        if hit(q) then
+            push_recent({ recipe = q.recipe, count = q.count, result = "cancelled", detail = "removed from queue", source = q.source })
+            table.remove(S.queue, i); res.queued = res.queued + 1
+        end
+    end
+
+    local pend = engine._native_pending
+    if pend and (all or (pend.order and hit(pend.order)) or pend.expect_recipe == sel) then
+        engine._native_pending = nil
+        res.queued = res.queued + 1
+    end
+
+    for i = #(engine._placed_watch or {}), 1, -1 do
+        local w = engine._placed_watch[i]
+        local m = all or w.recipe == sel or w.target == sel
+        if not m and is_mapid then
+            local id = engine and discovery.station_identity and discovery.station_identity(w.station)
+            m = id and id.mapId == sel
+        end
+        if m then
+            local okc, how = engine.cancel_station(w.station)
+            push_recent({ recipe = w.recipe, count = w.count,
+                result = okc and "cancelled" or "cancel-failed", detail = tostring(how) })
+            util.log(string.format("cancel %s @ %s -> %s (%s)", tostring(w.recipe), tostring(w.target), tostring(okc), tostring(how)))
+            table.remove(engine._placed_watch, i)
+            if okc then res.placed = res.placed + 1 end
+        end
+    end
+
+    if res.queued + res.placed > 0 then persist_queue() end
+    return res
+end
+
 --- Pull immediate orders the app dropped into orders.json, enqueue, clear the file.
+-- A list entry with a `cancel` field (or action="cancel") is a cancel directive,
+-- not an order: `{ "cancel": "<order id | recipe | target mapId>" }` or `{ "cancel": true }`.
 local function ingest_orders()
     local raw = util.read_file(PATHS.orders)
     if not raw or raw:match("^%s*$") then return end
@@ -114,14 +166,21 @@ local function ingest_orders()
     end
     local added = 0
     for _, raw_order in ipairs(list) do
-        local o = rules.normalize_order(raw_order)
-        if o then
-            local dup = false
-            for _, q in ipairs(S.queue) do if q.id == o.id then dup = true end end
-            if not dup then
-                o.attempts = 0
-                S.queue[#S.queue + 1] = o
-                added = added + 1
+        if type(raw_order) == "table" and (raw_order.cancel ~= nil or raw_order.action == "cancel") then
+            local sel = raw_order.cancel
+            if sel == nil then sel = raw_order.target or raw_order.recipe or raw_order.id end
+            local r = cancel_orders(sel)
+            util.log(string.format("cancel '%s' -> %d queued, %d placed", tostring(sel), r.queued, r.placed))
+        else
+            local o = rules.normalize_order(raw_order)
+            if o then
+                local dup = false
+                for _, q in ipairs(S.queue) do if q.id == o.id then dup = true end end
+                if not dup then
+                    o.attempts = 0
+                    S.queue[#S.queue + 1] = o
+                    added = added + 1
+                end
             end
         end
     end
@@ -185,6 +244,15 @@ engine._on_result = function(order, placed, detail, soft)
         end
     end
     persist_queue()
+end
+
+--- A native order's recipe was set but no Pal is working it (missing materials,
+--- furnace fuel, or no free work slot). Surface it -- don't leave it looking placed.
+engine._on_starved = function(w, reason)
+    push_recent({ recipe = w.recipe, count = w.count, result = "warning",
+        detail = reason, source = "order", target = w.target })
+    util.log(string.format("WARN %s x%s @ %s -- %s",
+        tostring(w.recipe), tostring(w.count), tostring(w.target or "?"), tostring(reason)))
 end
 
 -- ---------------------------------------------------------------- publish
@@ -262,6 +330,9 @@ local function scan_cycle(reason, light)
         if engine.backend() == "native" and #S.queue > 0 and discovery.connected_player_id() then
             engine.flush({})
         end
+
+        -- did the game actually start the recipes we set? warn on any it dropped.
+        if type(engine.sweep_placed_watch) == "function" then pcall(engine.sweep_placed_watch) end
 
         S.lastScan = os.date("!%Y-%m-%dT%H:%M:%SZ")
         write_state()
@@ -357,6 +428,15 @@ local function boot()
         end)
     end
 
+    -- one-shot: learn the Cancel_ServerInternal signature (needed for cancelling a
+    -- craft the game already accepted). Cheap reflection, logs once.
+    if type(engine.probe_cancel) == "function" and type(ExecuteWithDelay) == "function" then
+        ExecuteWithDelay(14000, function()
+            if ExecuteInGameThread then ExecuteInGameThread(function() pcall(engine.probe_cancel) end)
+            else pcall(engine.probe_cancel) end
+        end)
+    end
+
     -- Optional one-shot RE diagnostics (zero-player autonomy research). Off unless
     -- config DebugDiagnostics=true. The connected-player product does not need them.
     if CFG.debug_diag and type(ExecuteWithDelay) == "function" then
@@ -390,6 +470,8 @@ _G.PalCommand.enqueue = function(o)
     if n then n.attempts = 0; S.queue[#S.queue + 1] = n; persist_queue(); return true end
     return false
 end
+_G.PalCommand.cancel = function(sel) return cancel_orders(sel) end
+_G.PalCommand.watch = function() return engine._placed_watch end
 
 local armed = false
 local function arm() if not armed then armed = true; pcall(boot) end end

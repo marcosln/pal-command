@@ -193,6 +193,11 @@ end
 -- request is *submitted* here and *reaped* by M.native_tick() on a fast timer.
 M._native_pending = nil   -- { rid, station, order, at, pokes }
 
+-- Native orders whose recipe the game accepted, kept until that recipe leaves the
+-- machine (completed / starved / cancelled). Doubles as the ledger of "recipes we
+-- set" so M.cancel() only ever touches our own crafts, never a player's.
+M._placed_watch = {}      -- [{ station, recipe, count, target, at, ever_workable, progressed, last_remaining, warned }]
+
 local function poke_trigger(station_obj)
     pcall(function() if station_obj then station_obj:GetCurrentRecipeId() end end)
 end
@@ -356,6 +361,13 @@ function M.native_tick()
                     pcall(M._on_result, pend.order, true,
                         string.format("native: verified %s req=%s", tostring(now.recipe), tostring(now.requested)), false)
                 end
+                -- Watch it: recipe is set, but is a Pal actually going to work it?
+                M._placed_watch[#M._placed_watch + 1] = {
+                    station = pend.station, recipe = pend.expect_recipe, count = pend.expect_count,
+                    target = pend.order and (pend.order.target or pend.order.baseId) or nil,
+                    at = os.time(), ever_workable = (now.workable == true), progressed = false,
+                    last_remaining = tonumber(now.remaining) or pend.expect_count, warned = false,
+                }
                 -- Queue-drain: if more orders wait and a player is still connected,
                 -- submit the next one right away instead of waiting a scan cycle.
                 if not M._native_pending and type(M._provider) == "function"
@@ -578,6 +590,87 @@ function M.install_hook()
     return installed
 end
 
+-- ---------------------------------------------------------------- placement watch / cancel
+
+--- Re-check native orders whose recipe we set: is a Pal actually working them?
+--- `workable` right at placement is flaky (furnaces report false for a beat), so
+--- we judge over time -- became workable, or `remaining` dropped below the request
+--- = healthy. A recipe that sits unworkable with no progress past ~75s is starved
+--- (missing ingredients / furnace fuel / no free Pal slot) -> one warning.
+--- When the recipe leaves the machine we stop watching without a verdict: it could
+--- be a completed batch, a cancel, or a slow starve -- the proactive check above
+--- has already caught the clear starve cases. Pure reads.
+function M.sweep_placed_watch()
+    if #M._placed_watch == 0 then return end
+    local t = os.time()
+    for i = #M._placed_watch, 1, -1 do
+        local w = M._placed_watch[i]
+        local st = valid(w.station) and discovery.station_state(w.station) or nil
+        if not st or st.recipe ~= w.recipe then
+            table.remove(M._placed_watch, i)
+        else
+            if st.workable == true then w.ever_workable = true end
+            local rem = tonumber(st.remaining)
+            if rem and rem > 0 and rem < (w.count or math.huge) then w.progressed = true end
+            local age = t - w.at
+            local healthy = w.ever_workable or w.progressed
+            if not healthy and age > 75 and not w.warned then
+                w.warned = true
+                if type(M._on_starved) == "function" then
+                    pcall(M._on_starved, w, "placed but not working after " .. age
+                        .. "s -- check materials / furnace fuel / a free Pal work slot")
+                end
+            elseif healthy and age > 300 then
+                table.remove(M._placed_watch, i)   -- confirmed working; stop watching
+            end
+        end
+    end
+end
+
+--- One-shot: log the param layout + flags of Cancel_ServerInternal so we know how
+--- to call it. Cheap; run once at startup.
+function M.probe_cancel()
+    local fn = ok(function() return StaticFindObject("/Script/Pal.PalMapObjectConvertItemModel:Cancel_ServerInternal") end)
+    if not fn then util.log("probe_cancel: UFunction not found"); return end
+    local flags = ok(function() return fn:GetFunctionFlags() end)
+    local params = {}
+    pcall(function()
+        fn:ForEachProperty(function(p)
+            params[#params + 1] = string.format("%s@%s(%s)",
+                util.fstr(ok(function() return p:GetFName() end)),
+                tostring(tonumber(ok(function() return p:GetOffset() end)) or "?"),
+                util.fstr(ok(function() return p:GetClass():GetFName() end)))
+        end)
+    end)
+    util.log(string.format("probe_cancel: flags=%s params=[%s]",
+        flags and string.format("%X", flags) or "?", table.concat(params, ", ")))
+end
+
+--- Clear the recipe on one station (cancel an in-flight craft). Tries the plain
+--- Cancel_ServerInternal call from Lua (no FPalNetArchive -> no #378 problem).
+--- Needs a connected pid, same as ChangeRecipe.
+function M.cancel_station(station_obj)
+    if not valid(station_obj) then return false, "invalid station" end
+    local s0 = discovery.station_state(station_obj)
+    if s0.recipe == nil or s0.recipe == "" or s0.recipe == "None" then
+        return true, "already idle"
+    end
+    local pid = select(1, discovery.connected_player_for_station(station_obj))
+        or discovery.connected_player_id()
+    for _, args in ipairs({ { pid or 0 }, {} }) do
+        local fired = pcall(function() station_obj:Cancel_ServerInternal(table.unpack(args)) end)
+        if fired then
+            for _ = 1, 4 do
+                local a = discovery.station_state(station_obj)
+                if a.recipe == nil or a.recipe == "" or a.recipe == "None" then
+                    return true, "Cancel_ServerInternal(" .. (#args > 0 and "pid" or "") .. ")"
+                end
+            end
+        end
+    end
+    return false, "Cancel_ServerInternal did not clear (pid=" .. tostring(pid) .. ", recipe=" .. tostring(s0.recipe) .. ")"
+end
+
 function M.stats()
     local s = {}
     for k, v in pairs(M._stats) do s[k] = v end
@@ -592,6 +685,13 @@ function M.stats()
     } or nil
     s.connectedPid = discovery.connected_player_id()
     s.layout = M._layout
+    s.placedWatch = {}
+    for _, w in ipairs(M._placed_watch) do
+        s.placedWatch[#s.placedWatch + 1] = {
+            recipe = w.recipe, count = w.count, target = w.target,
+            age = os.time() - w.at, everWorkable = w.ever_workable, progressed = w.progressed, warned = w.warned,
+        }
+    end
     return s
 end
 
