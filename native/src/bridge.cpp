@@ -34,9 +34,9 @@
 // ---------------------------------------------------------------- config
 
 #ifndef PALCOMMAND_UE4SS_SHA
-#define PALCOMMAND_UE4SS_SHA "ba2efd55"
+#define PALCOMMAND_UE4SS_SHA "ba2efd55"   // advisory: reported in status, never a hard gate
 #endif
-#define PALCOMMAND_BRIDGE_VERSION 1
+#define PALCOMMAND_BRIDGE_VERSION 2
 
 static constexpr uint32_t kMaxArchiveBytes = 512;
 static constexpr uint32_t kMaxParamsBytes  = 256;
@@ -76,6 +76,7 @@ static const char* kSym_UnregisterHook = "?UnregisterHook@UFunction@Unreal@RC@@Q
 static HMODULE            g_module = nullptr;
 static HMODULE            g_ue4ss = nullptr;
 static void*              g_mod_object = nullptr;
+static char               g_resolve_detail[256] = "not-run";
 static Fn_CppUserModDtor  g_dtor = nullptr;
 static Fn_ProcessEvent    g_process_event = nullptr;
 static Fn_RegisterPreHook g_register_pre_hook = nullptr;
@@ -361,7 +362,7 @@ static void reap_done() {
 }
 
 static DWORD WINAPI worker(LPVOID) {
-    write_status("ready", 0, "worker-started");
+    write_status("ready", 0, g_resolve_detail);
     while (WaitForSingleObject(g_stop_event, kPollIntervalMs) == WAIT_TIMEOUT) {
         reap_done();
         handle_request();
@@ -372,18 +373,50 @@ static DWORD WINAPI worker(LPVOID) {
 
 // ---------------------------------------------------------------- symbol resolution
 
+// Locate the module that actually exports the UE4SS C++ ABI. Usually UE4SS.dll,
+// but proxy loaders (dwmapi/xinput/d3d11) and future renames mean we probe by
+// symbol rather than trusting the name or the install path.
+static HMODULE locate_ue4ss() {
+    const wchar_t* names[] = { L"UE4SS.dll", L"dwmapi.dll", L"xinput1_3.dll",
+                               L"xinput1_4.dll", L"d3d11.dll", L"dinput8.dll", nullptr };
+    for (int i = 0; names[i]; ++i) {
+        HMODULE m = GetModuleHandleW(names[i]);
+        if (m && GetProcAddress(m, kSym_Ctor)) return m;
+    }
+    return GetModuleHandleW(L"UE4SS.dll");   // may be null; caller reports it
+}
+
 static bool resolve_symbols(Fn_CppUserModCtor* ctor) {
-    g_ue4ss = GetModuleHandleW(L"UE4SS.dll");
-    if (!g_ue4ss) return false;
-    if (!dll_path_contains(g_ue4ss, PALCOMMAND_UE4SS_SHA)) return false;
+    g_ue4ss = locate_ue4ss();
+    if (!g_ue4ss) {
+        _snprintf_s(g_resolve_detail, _TRUNCATE, "UE4SS module not loaded");
+        return false;
+    }
 
-    *ctor               = (Fn_CppUserModCtor)  GetProcAddress(g_ue4ss, kSym_Ctor);
-    g_dtor              = (Fn_CppUserModDtor)  GetProcAddress(g_ue4ss, kSym_Dtor);
-    g_process_event     = (Fn_ProcessEvent)    GetProcAddress(g_ue4ss, kSym_ProcessEvent);
-    g_register_pre_hook = (Fn_RegisterPreHook) GetProcAddress(g_ue4ss, kSym_RegisterPreHook);
-    g_unregister_hook   = (Fn_UnregisterHook)  GetProcAddress(g_ue4ss, kSym_UnregisterHook);
+    struct { const char* name; void** slot; } wanted[] = {
+        { kSym_Ctor,            reinterpret_cast<void**>(ctor)                 },
+        { kSym_Dtor,            reinterpret_cast<void**>(&g_dtor)              },
+        { kSym_ProcessEvent,    reinterpret_cast<void**>(&g_process_event)     },
+        { kSym_RegisterPreHook, reinterpret_cast<void**>(&g_register_pre_hook) },
+        { kSym_UnregisterHook,  reinterpret_cast<void**>(&g_unregister_hook)   },
+    };
+    int resolved = 0;
+    const char* first_missing = nullptr;
+    for (auto& w : wanted) {
+        *w.slot = reinterpret_cast<void*>(GetProcAddress(g_ue4ss, w.name));
+        if (*w.slot) ++resolved;
+        else if (!first_missing) first_missing = w.name;
+    }
 
-    return *ctor && g_dtor && g_process_event && g_register_pre_hook && g_unregister_hook;
+    const bool sha_in_path = dll_path_contains(g_ue4ss, PALCOMMAND_UE4SS_SHA);
+    if (resolved != 5) {
+        _snprintf_s(g_resolve_detail, _TRUNCATE, "symbols %d/5 missing:%.180s",
+                    resolved, first_missing ? first_missing : "?");
+        return false;
+    }
+    _snprintf_s(g_resolve_detail, _TRUNCATE, "symbols 5/5 sha-path:%s",
+                sha_in_path ? "match" : "unverified(ok)");
+    return true;
 }
 
 // ---------------------------------------------------------------- entry points
@@ -393,7 +426,7 @@ extern "C" __declspec(dllexport) void* start_mod() {
 
     Fn_CppUserModCtor ctor = nullptr;
     if (!resolve_symbols(&ctor)) {
-        write_status("disabled", 0, "ue4ss-build-or-symbol-mismatch");
+        write_status("disabled", 0, g_resolve_detail);
         return nullptr;
     }
 
