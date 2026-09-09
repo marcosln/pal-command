@@ -5,18 +5,20 @@ compatibility_date = "2026-09-01"
 # The PWA is served from ./public as static assets; /api/* goes to the Worker.
 assets = { directory = "./public", binding = "ASSETS" }
 
-# Short-lived cache for inventory/station snapshots pulled from the host.
-# Create with:  npx wrangler kv namespace create PALCMD_CACHE
+# Short-lived cache for the inventory/station snapshot pulled from DatHost.
+#   npx wrangler kv namespace create PALCMD_CACHE
+# then paste the printed id below.
 [[kv_namespaces]]
 binding = "CACHE"
-id = "REPLACE_WITH_KV_ID"
+id = "PASTE_KV_ID_HERE"
 
 [vars]
-# Non-secret defaults. Secrets (APP_TOKEN, DATHOST_USER, DATHOST_KEY) go in via
-#   npx wrangler secret put APP_TOKEN
 SNAPSHOT_TTL_SECONDS = "15"
-
-# One entry per managed server. For v1 a single server is fine.
-# DATHOST_SERVER_ID is set as a var or secret.
-DATHOST_SERVER_ID = "REPLACE_WITH_SERVER_ID"
 MOD_DATA_PATH = "Binaries/Win64/ue4ss/Mods/PalCommand/data"
+# The server id from the DatHost URL. Not a secret (it's in every API path).
+DATHOST_SERVER_ID = "6a9966f03a02c380ecdb8e18"
+
+# Secrets — set with the CLI, never committed:
+#   npx wrangler secret put APP_TOKEN        # you invent this; you'll type it into the app
+#   npx wrangler secret put DATHOST_USER     # your DatHost account email
+#   npx wrangler secret put DATHOST_KEY      # your DatHost account password

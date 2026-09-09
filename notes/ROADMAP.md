@@ -112,17 +112,23 @@ Code: rules.lua `M.evaluate` + main.lua `apply_rules` / `inflight_for`. Deploy 8
 
 ## STAGE 4 — Cloud Worker + PWA wired to live data
 
-**Architecture note (2026-09-09):** for a published app the Worker must be
-**multi-tenant** — ONE Worker (we host it), each user pastes their own credentials
-in the app; never "deploy your own Worker". Two connection paths, offered in the app:
-  - **Host API** (DatHost etc.): user generates an API key in their host panel,
-    pastes it in the app. Worker talks to the host's file API. No FTP. Works today
-    for DatHost (`api/0.1/game-servers/{id}/files`, key auth).
-  - **Mod push** (any host, incl. self-host): user sets `WorkerBaseUrl` + a
-    `ServerToken` in `config.ini` once. The mod does outbound HTTPS — POSTs
-    inventory/state, polls orders/rules. App only ever talks to the Worker, keyed
-    by that token. No host API, no FTP, host-agnostic. NEEDS: outbound HTTP from
-    UE4SS-Lua — not built in; likely via the C++ bridge or `FHttpModule` reflection.
+**Architecture (settled 2026-09-09/10):**
+  - **PATH A — now, for dev + the user's own phone:** single-tenant Worker ↔ DatHost
+    file API. DatHost API auth is **HTTP Basic with the account EMAIL + PASSWORD**
+    (no API key, no limited token — confirmed at dathost.readme.io). Those go in as
+    Cloudflare Worker *secrets* (user runs `wrangler secret put`, we never see them).
+    Accepted risk: those creds = full DatHost account control; blast radius = one
+    hobby server, recoverable from backups. Gets the phone working immediately and
+    the PWA is ~90% identical to the published version.
+  - **PATH B — before publishing (Stage 5), the App Store architecture:** the MOD
+    pushes outbound HTTPS to ONE multi-tenant Worker (we host it, ~$0-5/mo), keyed
+    by a per-server `ServerToken` the user generates in the app + pastes in
+    `config.ini`. No DatHost creds anywhere, no host API — works on any host that
+    allows outbound HTTP. NEEDS: a WinHTTP client added to the C++ bridge (the mod
+    can't do outbound HTTP from UE4SS-Lua alone). The token IS the auth (a share
+    code); later add Sign in with Apple to sync tokens across devices.
+  Only the Worker's data source changes A→B (DatHost API → KV by token) + the mod
+  gains push. The PWA barely changes.
 
 - [ ] 4.1 Multi-tenant Worker: per-user record (host+id+key OR serverToken) in KV; `APP_TOKEN` becomes a per-user thing
 - [ ] 4.2 `wrangler kv namespace create` → fill `cloud/wrangler.toml`; `wrangler deploy`

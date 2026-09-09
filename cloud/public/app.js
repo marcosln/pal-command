@@ -26,13 +26,25 @@ const el = (t, p = {}, kids = []) => {
   return n;
 };
 
+// Palworld's internal ids are misleading (CopperOre = the common grey "Ore",
+// CopperIngot = the basic Ingot, IronIngot = "Refined Ingot"). Names below match
+// what the game shows in Spanish. Unknown ids fall back to a cleaned id string.
 const NAMES = {
-  Pal_crystal_S: "Fragmento de Paldium", Stone: "Piedra", Wood: "Madera", Ingot: "Lingote",
-  CopperIngot: "Lingote de cobre", CharcoalFragment: "Carbón", Charcoal: "Carbón", Nail: "Clavo",
-  Cloth: "Tela", Gunpowder: "Pólvora", RefinedIngot: "Lingote refinado", PalMetalIngot: "Lingote de metal Pal",
-  CrudeOil: "Petróleo crudo", HighQualityPalOil: "Aceite Pal de alta calidad", Flour: "Harina", Bread: "Pan",
-  CarbonFiber: "Fibra de carbono", CementConcrete: "Cemento", Cement: "Cemento", PolymerMaterial: "Polímero",
-  ElectronicCircuit: "Circuito", Sulfur: "Azufre", Quartz: "Cuarzo", Coal: "Carbón mineral", PalSphere: "Pal Sphere",
+  Pal_crystal_S: "Fragmento de Paludio", Pal_crystal_S_2: "Fragmento de Paludio", Pal_crystal_S_3: "Fragmento de Paludio",
+  Stone: "Piedra", Wood: "Madera", Wood_Fine: "Madera fina", Fiber: "Fibra", PalFluid: "Fluido Pal",
+  CopperOre: "Mineral de metal", CopperIngot: "Lingote de metal", IronIngot: "Lingote de metal refinado",
+  IronOre: "Mineral de hierro", StealIngot: "Lingote de acero", StainlessSteel: "Acero inoxidable",
+  ManganeseOre: "Mineral de manganeso", ManganeseIngot: "Lingote de manganeso", Chromium: "Cromo",
+  Charcoal: "Carbón", Coal: "Carbón mineral", Sulfur: "Azufre", Quartz: "Cuarzo", CrudeOil: "Petróleo crudo",
+  Cloth: "Tela", Cloth2: "Tela", Leather: "Cuero", Wool: "Lana", Nail: "Clavo", GunPowder2: "Pólvora",
+  Plastic: "Plástico", Polymer: "Polímero", CarbonFiber: "Fibra de carbono", Cement: "Cemento",
+  MachineParts: "Piezas de máquina", MachineParts2: "Piezas de máquina", Computer: "Circuito",
+  Flour: "Harina", Wheat: "Trigo", Bread: "Pan", Berries: "Bayas", Honey: "Miel", Egg: "Huevo", Milk: "Leche",
+  RedBerries: "Bayas", Tomato: "Tomate", Lettuce: "Lechuga", Onion: "Cebolla", Potato: "Patata", Carrot: "Zanahoria",
+  PalSphere: "Pal Sphere", PalSphere_Mega: "Mega Sphere", PalSphere_Giga: "Giga Sphere",
+  Processed_Wood: "Madera procesada", HighGrade_Processed_Wood: "Madera procesada de alta calidad",
+  PalUpgradeStone: "Fragmento antiguo de civilización", ElectricOrgan: "Órgano eléctrico",
+  FireOrgan: "Llama ardiente", IceOrgan: "Cubito de hielo", bone: "Hueso",
 };
 const nice = (id) => NAMES[id] || String(id || "").replace(/^Pal_/, "").replace(/_/g, " ");
 const num = (n) => String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
@@ -76,8 +88,9 @@ function strip() {
   const b = s?.backend || s?.engine?.backend;
   const dot = box.querySelector(".dot");
   box.className = "strip " + (b === "native" ? "native" : b === "replay" ? "replay" : "");
+  const anyPlayer = s?.engine?.connectedPid != null;
   let t = !b ? "Sin datos del servidor"
-    : b === "native" ? "Autónomo · las órdenes se colocan solas"
+    : b === "native" ? (anyPlayer ? "Listo · las órdenes se colocan solas" : "En espera · un jugador debe estar conectado (AFK vale)")
     : "Al craftear · se colocan cuando alguien fabrica";
   if (s?.lastError) { box.classList.add("bad"); t = "Aviso: " + s.lastError; }
   $("#stripText").textContent = t;
@@ -148,6 +161,28 @@ function renderStock() {
   }
 }
 
+function machineLabel(s) {
+  const t = String(s.machineType || "").replace(/^BP_BuildObject_|_C$/g, "").replace(/_/g, " ");
+  const st = s.state || {};
+  const busy = st.workable || (st.requested || 0) > 0;
+  return `${s.baseName} · ${t}${busy ? ` — ${nice(st.recipe)} ×${st.remaining}` : " — libre"}`;
+}
+
+function renderMachines() {
+  const sel = $("#ordMachine");
+  const recipe = $("#ordRecipe").value;
+  const all = SNAP?.stations?.stations || [];
+  const forRecipe = all.filter((s) => (s.recipes || []).includes(recipe));
+  const cur = sel.value;
+  sel.innerHTML = "";
+  sel.append(el("option", { value: "" }, "Cualquier máquina libre"));
+  forRecipe
+    .slice()
+    .sort((a, b) => (a.baseName + a.machineType).localeCompare(b.baseName + b.machineType))
+    .forEach((s) => s.mapId && sel.append(el("option", { value: s.mapId }, machineLabel(s))));
+  if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
+}
+
 function renderOrder() {
   const st = SNAP?.stations;
   const sel = $("#ordRecipe");
@@ -162,7 +197,7 @@ function renderOrder() {
       recipes.get(r).add(s.baseName);
     }
     floor.append(el("div", { class: "row" }, [
-      el("span", { class: "name" }, [el("span", { class: "n" }, s.baseName)]),
+      el("span", { class: "name" }, [el("span", { class: "n" }, machineLabel(s).split(" — ")[0])]),
       el("span", { class: "chip " + (s.state?.workable ? "run" : "idle") },
         s.state?.workable ? `${nice(s.state.recipe)} ·${s.state.remaining}` : "libre"),
     ]));
@@ -175,7 +210,10 @@ function renderOrder() {
     sel.append(el("option", { value: id }, `${nice(id)}  —  ${[...recipes.get(id)].join(", ")}`));
   });
   if (cur && recipes.has(cur)) sel.value = cur;
-  $("#ordHint").textContent = recipes.size ? "El pedido entra a la cola y se coloca en una estación libre." : "";
+  renderMachines();
+  $("#ordHint").textContent = recipes.size
+    ? "Elegí una máquina fija (espera si está ocupada) o dejá “cualquiera libre”."
+    : "";
 }
 
 function ruleRow(rule, i) {
@@ -186,8 +224,8 @@ function ruleRow(rule, i) {
     el("input", { class: "grow", value: rule.item || "", placeholder: "Item (p.ej. Pal_crystal_S)", oninput: (e) => set("item", e.target.value.trim()) }),
     el("label", { class: "chk" }, [el("input", { type: "checkbox", checked: rule.enabled !== false ? "" : null, onchange: (e) => set("enabled", e.target.checked) }), "on"]),
   ]));
-  const g = el("div", { class: "trio", style: "margin-top:9px" });
-  for (const [k, lbl] of [["min", "mínimo"], ["target", "objetivo"], ["batch", "tanda"]]) {
+  const g = el("div", { class: "trio", style: "margin-top:9px;grid-template-columns:1fr 1fr" });
+  for (const [k, lbl] of [["min", "mínimo"], ["target", "objetivo"], ["batch", "tanda (opc.)"], ["maxInProgress", "máx. a la vez (opc.)"]]) {
     g.append(el("label", {}, [
       lbl,
       el("input", { type: "number", inputmode: "numeric", value: rule[k] ?? "", oninput: (e) => set(k, e.target.value === "" ? undefined : Number(e.target.value)) }),
@@ -232,12 +270,39 @@ function renderStatus() {
     el("button", { class: "mini ghost", onclick: () => removeOrder(o.id) }, "Quitar"),
   ]));
   if (!(s?.queue || []).length) q.append(el("div", { class: "empty" }, "Nada en cola."));
+  // in progress (recipes we set on machines; flags ones that aren't producing yet)
+  const pw = s?.engine?.placedWatch || [];
+  const wl = $("#watchList");
+  if (wl) {
+    wl.innerHTML = "";
+    $("#watchCount").textContent = String(pw.length);
+    for (const w of pw) wl.append(el("div", { class: "row" }, [
+      el("span", { class: "name" }, [el("span", { class: "n" }, `${nice(w.recipe)} ×${w.count}`)]),
+      el("span", { class: "chip " + (w.producing ? "run" : "idle"), style: w.stalled ? "color:var(--warn)" : "" },
+        w.producing ? "fabricando" : w.stalled ? "sin Pal / energía" : "puesta"),
+    ]));
+    if (!pw.length) wl.append(el("div", { class: "empty" }, "—"));
+  }
+
+  // standing-rule status
+  const rs = s?.rules || [];
+  const rl = $("#ruleStatusList");
+  if (rl) {
+    rl.innerHTML = "";
+    for (const r of rs) rl.append(el("div", { class: "row" }, [
+      el("span", { class: "name" }, [el("span", { class: "n" }, nice(r.item)), el("span", { class: "id" }, `${num(r.have)}/${num(r.min)}`)]),
+      el("span", { class: "chip " + (r.low ? "idle" : "run"), style: r.low ? "color:var(--warn)" : "" },
+        !r.enabled ? "off" : r.low ? (r.onCooldown ? "espera" : "bajo") : "ok"),
+    ]));
+    if (!rs.length) rl.append(el("div", { class: "empty" }, "Sin reglas."));
+  }
+
   const r = $("#recentList");
   r.innerHTML = "";
   const recent = (s?.recent || []).slice().reverse();
   for (const x of recent) r.append(el("div", { class: "row" }, [
     el("span", { class: "name" }, [el("span", { class: "n" }, `${nice(x.recipe)} ×${x.count}`)]),
-    el("span", { class: "chip " + (x.result === "placed" ? "run" : "idle"), style: x.result !== "placed" ? "color:var(--bad)" : "" }, x.result),
+    el("span", { class: "chip " + (x.result === "placed" || x.result === "cancelled" ? "run" : "idle"), style: /fail|drop/.test(x.result) ? "color:var(--bad)" : "" }, x.result),
   ]));
   if (!recent.length) r.append(el("div", { class: "empty" }, "—"));
 }
@@ -266,10 +331,11 @@ async function refresh(opts = {}) {
 async function order() {
   const recipe = $("#ordRecipe").value;
   const count = Math.max(1, Math.floor(Number($("#ordCount").value) || 0));
+  const target = $("#ordMachine").value || undefined;
   if (!recipe || !count) return;
   $("#ordGo").disabled = true;
   try {
-    await api("/api/orders", { method: "POST", body: JSON.stringify({ recipe, count, transport: $("#ordTransport").checked }) });
+    await api("/api/orders", { method: "POST", body: JSON.stringify({ recipe, count, target, transport: $("#ordTransport").checked }) });
     toast(`En cola: ${nice(recipe)} ×${count}`);
     await refresh({ fresh: true });
   } catch (e) { toast(e.message, true); }
@@ -331,6 +397,7 @@ $("#cfgSave").addEventListener("click", async () => {
 $("#cfgDemo").addEventListener("click", () => { cfg.demo = true; gotoApp(); toast("Demostración con datos de ejemplo"); });
 $("#forget").addEventListener("click", () => { localStorage.clear(); location.reload(); });
 $("#ordGo").addEventListener("click", order);
+$("#ordRecipe").addEventListener("change", renderMachines);
 $("#rulesSave").addEventListener("click", saveRules);
 $("#ruleAdd").addEventListener("click", () => { (rulesDraft ||= []).push({ item: "", min: 0, target: 0, enabled: true }); renderRules(); $("#rulesSave").hidden = false; });
 $("#stockSearch").addEventListener("input", renderStock);
@@ -371,35 +438,37 @@ const DEMO = {
   fetchedAt: new Date().toISOString(),
   inventory: {
     diagnostics: { baseCount: 2, containerCount: 5, complete: true },
-    totals: { Stone: 5720, Wood: 1840, Nail: 210, Sulfur: 178, Pal_crystal_S: 128, Ingot: 96, CrudeOil: 79, CharcoalFragment: 40, Cloth: 12 },
+    totals: { Stone: 5720, Wood: 1840, CopperOre: 940, Sulfur: 178, Pal_crystal_S: 128, CopperIngot: 96, CrudeOil: 79, Charcoal: 40, Cloth: 12 },
     bases: [
       { name: "Base principal", containers: [
         { name: "Cofre 1", items: { Stone: 5200, Wood: 1500 } },
-        { name: "Cofre 2", items: { Ingot: 96, Nail: 210, Cloth: 12 } },
+        { name: "Cofre 2", items: { CopperIngot: 96, CopperOre: 940, Cloth: 12 } },
       ] },
       { name: "Base minera", containers: [
-        { name: "Cofre 1", items: { Stone: 520, Sulfur: 178, CrudeOil: 79, CharcoalFragment: 40 } },
+        { name: "Cofre 1", items: { Stone: 520, Sulfur: 178, CrudeOil: 79, Charcoal: 40 } },
       ] },
     ],
     guildChest: { available: true, items: { Pal_crystal_S: 128 } },
   },
   stations: {
     stations: [
-      { key: "b1|crush", baseName: "Base principal", recipes: ["Pal_crystal_S", "CharcoalFragment"], state: { recipe: "None", remaining: 0, workable: false } },
-      { key: "b1|furn", baseName: "Base principal", recipes: ["Ingot", "CopperIngot", "RefinedIngot"], state: { recipe: "Ingot", remaining: 32, workable: true } },
-      { key: "b2|crush", baseName: "Base minera", recipes: ["Pal_crystal_S"], state: { recipe: "None", remaining: 0, workable: false } },
+      { key: "b1|crush", mapId: "demo-crush-1", machineType: "BP_BuildObject_Crusher_C", baseName: "Base principal", recipes: ["Pal_crystal_S", "Charcoal"], state: { recipe: "None", remaining: 0, workable: false } },
+      { key: "b1|furn", mapId: "demo-furn-1", machineType: "BP_BuildObject_BlastFurnace_C", baseName: "Base principal", recipes: ["CopperIngot", "IronIngot", "Charcoal"], state: { recipe: "CopperIngot", remaining: 32, requested: 50, workable: true } },
+      { key: "b2|crush", mapId: "demo-crush-2", machineType: "BP_BuildObject_Crusher_C", baseName: "Base minera", recipes: ["Pal_crystal_S"], state: { recipe: "None", remaining: 0, workable: false } },
     ],
   },
   state: {
-    backend: "replay", hookInstalled: true, queueDepth: 1,
+    backend: "native", hookInstalled: true, queueDepth: 1,
     lastScan: new Date(Date.now() - 42000).toISOString(),
-    queue: [{ id: "d0", recipe: "Pal_crystal_S", count: 200, source: "regla:paldium" }],
+    queue: [{ id: "d0", recipe: "Pal_crystal_S", count: 200, source: "rule:paldium" }],
     recent: [
-      { recipe: "Nail", count: 100, result: "placed" },
-      { recipe: "Ingot", count: 50, result: "placed" },
+      { recipe: "Charcoal", count: 100, result: "placed" },
+      { recipe: "CopperIngot", count: 50, result: "placed" },
       { recipe: "Cloth", count: 20, result: "dropped" },
     ],
-    engine: { backend: "replay", placed: 12, failed: 1 },
+    rules: [{ id: "paldium", item: "Pal_crystal_S", enabled: true, have: 128, min: 300, target: 1000, inProgress: 200, low: true, onCooldown: false }],
+    engine: { backend: "native", connectedPid: 256, placed: 12, failed: 1,
+      placedWatch: [{ recipe: "CopperIngot", count: 50, producing: true, workable: true, stalled: false }] },
   },
   rules: { rules: [{ id: "paldium", item: "Pal_crystal_S", recipe: "Pal_crystal_S", min: 300, target: 1000, batch: 200, enabled: true }] },
   orders: [],

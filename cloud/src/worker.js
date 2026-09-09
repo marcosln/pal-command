@@ -128,19 +128,27 @@ async function handleApi(request, env, ctx, url) {
     return json(payload);
   }
 
-  // ---- POST /api/orders
+  // ---- POST /api/orders   (also accepts { cancel: "<id|recipe|mapId>" | true })
   if (path === "orders" && request.method === "POST") {
     const body = await request.json().catch(() => null);
-    if (!body || typeof body.recipe !== "string" || !(body.count > 0)) {
-      return json({ error: "bad-order", need: "{ recipe: string, count: number, transport?, baseId? }" }, 400);
-    }
     await dh.mountOverlay();
     const list = await readJson(dh, "orders.json", []);
+
+    if (body && body.cancel != null) {
+      list.push({ cancel: body.cancel });
+      await dh.writeFile("orders.json", JSON.stringify(list));
+      await env.CACHE.delete(`snap:${env.DATHOST_SERVER_ID}`);
+      return json({ ok: true, cancel: body.cancel });
+    }
+    if (!body || typeof body.recipe !== "string" || !(body.count > 0)) {
+      return json({ error: "bad-order", need: "{ recipe, count, transport?, target?, baseId? }" }, 400);
+    }
     const order = {
       id: crypto.randomUUID(),
       recipe: body.recipe,
       count: Math.min(Math.floor(body.count), 100000),
       transport: body.transport !== false,
+      target: (typeof body.target === "string" && body.target) || undefined,   // machine mapId (hard pin)
       baseId: body.baseId || undefined,
       createdAt: new Date().toISOString(),
     };
@@ -176,7 +184,9 @@ async function handleApi(request, env, ctx, url) {
         min: Number(r.min) || 0,
         target: Number(r.target) || Number(r.min) || 0,
         batch: r.batch ? Math.max(1, Math.floor(Number(r.batch))) : undefined,
+        maxInProgress: r.maxInProgress ? Math.max(1, Math.floor(Number(r.maxInProgress))) : undefined,
         baseId: r.baseId || undefined,
+        machine: (typeof r.machine === "string" && r.machine) || undefined,
         transport: r.transport !== false,
         enabled: r.enabled !== false,
       }));
