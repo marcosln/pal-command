@@ -99,6 +99,10 @@ end
 --- for standing rules. Counts: pending queue orders + `remaining` on any station
 --- currently set to it + our just-placed orders not yet visible in the snapshot.
 local function inflight_for(recipe, stations)
+    -- identity that is stable across reflection snapshots (each scan hands back a
+    -- fresh wrapper for the same UObject, so tostring() of the wrapper won't match).
+    local function addr(o) return (o and util.ok(function() return o:GetAddress() end)) or nil end
+
     local total = 0
     for _, o in ipairs(S.queue) do
         if o.recipe == recipe then total = total + (tonumber(o.count) or 0) end
@@ -107,11 +111,12 @@ local function inflight_for(recipe, stations)
     for _, st in ipairs(stations or {}) do
         if st.state.recipe == recipe then
             total = total + (tonumber(st.state.remaining) or 0)
-            counted[tostring(st.obj)] = true
+            local a = addr(st.obj); if a then counted[a] = true end
         end
     end
     for _, w in ipairs(engine._placed_watch or {}) do
-        if w.recipe == recipe and not counted[tostring(w.station)] then
+        local a = addr(w.station)
+        if w.recipe == recipe and (not a or not counted[a]) then
             total = total + (tonumber(w.count) or 0)   -- placed, not in the snapshot yet
         end
     end
@@ -275,6 +280,7 @@ local function apply_rules(totals, stations)
     end
     if added > 0 then
         util.log("rules enqueued " .. added .. " order(s)")
+        S.lastOrderAt = now   -- keep the scan loop in the fast cadence while a rule is acting
         persist_queue()
     end
 end
