@@ -36,7 +36,7 @@
 #ifndef PALCOMMAND_UE4SS_SHA
 #define PALCOMMAND_UE4SS_SHA "ba2efd55"   // advisory: reported in status, never a hard gate
 #endif
-#define PALCOMMAND_BRIDGE_VERSION 2
+#define PALCOMMAND_BRIDGE_VERSION 3
 
 static constexpr uint32_t kMaxArchiveBytes = 512;
 static constexpr uint32_t kMaxParamsBytes  = 256;
@@ -101,6 +101,8 @@ static bool               g_trigger_hooked = false;
 
 enum class PendingState { Idle, Armed, Executing, Done };
 
+enum class OpKind { Call, Inspect, CallPred };
+
 struct PendingCall {
     uint64_t request_id = 0;
     void*    station = nullptr;
@@ -111,13 +113,17 @@ struct PendingCall {
     uint32_t bytes_offset = 0;      // FScriptArray header offset within the struct
     uint32_t params_size = 0;
     uint32_t byte_count = 0;
-    bool     is_inspect = false;    // read-only r12b-chain inspection, not a call
-    void*    inspect_fn = nullptr;  // 0x2EA97D0 (objA getter) for the inspect op
+    OpKind   kind = OpKind::Call;
+    void*    inspect_fn = nullptr;  // 0x2EA97D0 (objA getter) -- inspect + callpred
+    // callpred extras (all disasm-derived, passed from Lua so the DLL stays generic)
+    void*    cp_sub_fn = nullptr;       // 0x2F2D830 (objA -> *(objA+0x78) resolver)
+    void*    cp_sentinel_addr = nullptr;// 0x148BE8AC0 (global compared in virt_2B8)
+    uint32_t cp_virt_off = 0;           // 0x2B8 (vtable slot of virt_2B8)
     uint8_t  bytes[kMaxArchiveBytes] = {0};
 };
 
-// filled by an inspect op, read back from native-inspect.ini
-static char g_inspect_result[512] = "";
+// filled by an inspect / callpred op, read back from native-inspect.ini
+static char g_inspect_result[1024] = "";
 
 static std::atomic<PendingState> g_pending_state{PendingState::Idle};
 static PendingCall  g_pending;
@@ -178,7 +184,7 @@ static void write_status(const char* state, uint64_t rid, const char* detail) {
 }
 
 static void write_response(uint64_t rid, const char* status, const char* detail) {
-    char buf[512];
+    char buf[1400];
     _snprintf_s(buf, _TRUNCATE,
                 "[bridge]\nversion=%d\nrequest_id=%llu\nstatus=%s\ndetail=%s\n",
                 PALCOMMAND_BRIDGE_VERSION, (unsigned long long)rid, status, detail ? detail : "none");
@@ -289,6 +295,97 @@ static const char* inspect_r12b_chain(void* station, void* get_objA) {
     }
 }
 
+// Structural offsets inside `sub` and its array entries. Disasm-derived
+// (notes/para-codex-06.md) -- small, stable, so kept here rather than plumbed
+// through Lua like the addresses. All reads below are bounds-checked.
+static constexpr uint32_t kSubArrOff    = 0x70;   // sub -> TArray<T*> base
+static constexpr uint32_t kSubCountOff  = 0x78;   // sub -> int32 count
+static constexpr uint32_t kElemFlagsOff = 0x08;   // UObject ObjectFlags
+static constexpr uint32_t kElemClassOff = 0x10;   // UObject ClassPrivate
+static constexpr uint32_t kElemOwnerOff = 0x12C;  // compared to sentinel in virt_2B8
+static constexpr uint32_t kElemActiveOff= 0x154;  // "entry active" gate in virt_2B8
+
+// Read-only: actually CALL the r12b predicate chain the way 0x2EB03F0 does and
+// report the boolean it returns, plus the full sub+0x70 assignment array so we
+// can see which entry (if any) blocks it offline. Every target here only reads:
+//   objA_fn   (0x2EA97D0)  -- module getter over the station ModuleArray
+//   sub_fn    (0x2F2D830)  -- writes *out = *(objA+0x78) after a GC check
+//   virt_2B8  (0x2E5AC30)  -- scans sub+0x70 and returns bool
+// No writes to game state; the only out-param is our local `sub`.
+// Leaf function, no C++ objects with destructors -> __try is legal.
+static const char* callpred_r12b(void* station, void* objA_fn, void* sub_fn,
+                                 void* sentinel_addr, uint32_t virt_off) {
+    __try {
+        void* objA = ((void* (*)(void*))objA_fn)(station);
+
+        void* sub = nullptr;
+        int   sub_ok = -1;
+        if (readable(objA, 0x80))
+            sub_ok = ((bool (*)(void*, void**))sub_fn)(objA, &sub) ? 1 : 0;
+
+        uint64_t vt = 0, virt2b8 = 0;
+        int      r12b = -1;
+        if (readable(sub, 0x160)
+            && !(*(uint32_t*)((uint8_t*)sub + kElemFlagsOff) & 0x60000000)) {
+            vt = *(uint64_t*)sub;
+            if (readable((void*)vt, virt_off + 8)) {
+                virt2b8 = *(uint64_t*)((uint8_t*)vt + virt_off);
+                if (readable((void*)virt2b8, 0x20))
+                    r12b = ((bool (*)(void*))virt2b8)(sub) ? 1 : 0;
+            }
+        }
+
+        uint64_t sentinel = readable(sentinel_addr, 8) ? *(uint64_t*)sentinel_addr : 0xBADBADull;
+
+        void*   arr = nullptr;
+        int32_t cnt = 0;
+        if (readable(sub, 0x80)) {
+            arr = *(void**)((uint8_t*)sub + kSubArrOff);
+            cnt = *(int32_t*)((uint8_t*)sub + kSubCountOff);
+        }
+        int32_t shown = cnt;
+        if (shown < 0) shown = 0;
+        if (shown > 16) shown = 16;
+
+        char slots[640];
+        int  sp = 0;
+        slots[0] = 0;
+        if (readable(arr, (size_t)shown * 8)) {
+            for (int i = 0; i < shown && sp < (int)sizeof(slots) - 100; ++i) {
+                void*    e = ((void**)arr)[i];
+                uint64_t ecls = 0, owner = 0;
+                uint32_t eflags = 0, active = 0;
+                if (readable(e, kElemActiveOff + 8)) {
+                    eflags = *(uint32_t*)((uint8_t*)e + kElemFlagsOff);
+                    ecls   = *(uint64_t*)((uint8_t*)e + kElemClassOff);
+                    owner  = *(uint64_t*)((uint8_t*)e + kElemOwnerOff);
+                    active = *(uint32_t*)((uint8_t*)e + kElemActiveOff);
+                }
+                int w = _snprintf_s(slots + sp, sizeof(slots) - sp, _TRUNCATE,
+                                    "%s%llX(cls=%llX fl=%X act=%X own=%llX)",
+                                    i ? "," : "",
+                                    (unsigned long long)(uintptr_t)e,
+                                    (unsigned long long)ecls, eflags, active,
+                                    (unsigned long long)owner);
+                if (w < 0) break;
+                sp += w;
+            }
+        }
+
+        _snprintf_s(g_inspect_result, _TRUNCATE,
+                    "r12b=%d sub_ok=%d objA=%llX sub=%llX vt=%llX virt2B8=%llX sentinel=%llX arr=%llX cnt=%d slots=[%s]",
+                    r12b, sub_ok,
+                    (unsigned long long)(uintptr_t)objA, (unsigned long long)(uintptr_t)sub,
+                    (unsigned long long)vt, (unsigned long long)virt2b8,
+                    (unsigned long long)sentinel, (unsigned long long)(uintptr_t)arr,
+                    cnt, slots);
+        return "callpred-done";
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        _snprintf_s(g_inspect_result, _TRUNCATE, "callpred-faulted");
+        return "callpred-crashed";
+    }
+}
+
 static void execute_pending_on_game_thread() {
     PendingState expected = PendingState::Armed;
     if (!g_pending_state.compare_exchange_strong(expected, PendingState::Executing)) return;
@@ -300,8 +397,11 @@ static void execute_pending_on_game_thread() {
     LeaveCriticalSection(&g_lock);
 
     const char* result = "unknown";
-    if (call.is_inspect) {
-        result = inspect_r12b_chain(call.station, call.inspect_fn);
+    if (call.kind == OpKind::Inspect || call.kind == OpKind::CallPred) {
+        result = (call.kind == OpKind::CallPred)
+                 ? callpred_r12b(call.station, call.inspect_fn, call.cp_sub_fn,
+                                 call.cp_sentinel_addr, call.cp_virt_off)
+                 : inspect_r12b_chain(call.station, call.inspect_fn);
         EnterCriticalSection(&g_lock);
         g_last_result = result;
         g_pending_state.store(PendingState::Done);
@@ -433,7 +533,7 @@ static void handle_request() {
     if (strcmp(op, "inspect") == 0) {
         PendingCall ci;
         ci.request_id = rid;
-        ci.is_inspect = true;
+        ci.kind = OpKind::Inspect;
         ci.station    = (void*)(uintptr_t)ini_u64(L"station", 16, &ok);       if (!ok || !ci.station)    { write_response(rid, "error", "station-invalid"); return; }
         ci.inspect_fn = (void*)(uintptr_t)ini_u64(L"inspect_fn", 16, &ok);    if (!ok || !ci.inspect_fn) { write_response(rid, "error", "inspect-fn-invalid"); return; }
         PendingState ex = PendingState::Idle;
@@ -441,6 +541,25 @@ static void handle_request() {
         EnterCriticalSection(&g_lock); g_pending = ci; g_last_result = "none"; LeaveCriticalSection(&g_lock);
         g_arm_count.fetch_add(1);
         write_response(rid, "call-armed", "inspect-armed");
+        return;
+    }
+
+    // read-only: run the r12b predicate chain for real and report the bool +
+    // the sub+0x70 assignment array (Codex step: observe r12b live).
+    if (strcmp(op, "callpred") == 0) {
+        PendingCall cp;
+        cp.request_id = rid;
+        cp.kind = OpKind::CallPred;
+        cp.station          = (void*)(uintptr_t)ini_u64(L"station", 16, &ok);        if (!ok || !cp.station)          { write_response(rid, "error", "station-invalid"); return; }
+        cp.inspect_fn       = (void*)(uintptr_t)ini_u64(L"objA_fn", 16, &ok);         if (!ok || !cp.inspect_fn)       { write_response(rid, "error", "objA-fn-invalid"); return; }
+        cp.cp_sub_fn        = (void*)(uintptr_t)ini_u64(L"sub_fn", 16, &ok);          if (!ok || !cp.cp_sub_fn)        { write_response(rid, "error", "sub-fn-invalid"); return; }
+        cp.cp_sentinel_addr = (void*)(uintptr_t)ini_u64(L"sentinel_addr", 16, &ok);   if (!ok || !cp.cp_sentinel_addr) { write_response(rid, "error", "sentinel-invalid"); return; }
+        cp.cp_virt_off      = (uint32_t)ini_u64(L"virt_off", 16, &ok);                if (!ok || cp.cp_virt_off == 0 || cp.cp_virt_off > 0x2000) { write_response(rid, "error", "virt-off-invalid"); return; }
+        PendingState ex = PendingState::Idle;
+        if (!g_pending_state.compare_exchange_strong(ex, PendingState::Armed)) { write_response(rid, "error", "bridge-busy"); return; }
+        EnterCriticalSection(&g_lock); g_pending = cp; g_last_result = "none"; LeaveCriticalSection(&g_lock);
+        g_arm_count.fetch_add(1);
+        write_response(rid, "call-armed", "callpred-armed");
         return;
     }
 
@@ -480,24 +599,26 @@ static void reap_done() {
     if (g_pending_state.load() != PendingState::Done) return;
     uint64_t rid;
     const char* result;
-    bool was_inspect;
+    OpKind kind;
     EnterCriticalSection(&g_lock);
     rid = g_pending.request_id;
     result = g_last_result;
-    was_inspect = g_pending.is_inspect;
+    kind = g_pending.kind;
     g_pending = PendingCall{};
     g_last_result = "none";
     LeaveCriticalSection(&g_lock);
     g_pending_state.store(PendingState::Idle);
-    if (was_inspect) {
-        char buf[640];
-        _snprintf_s(buf, _TRUNCATE, "[inspect]\nrequest_id=%llu\nresult=%s\n%s\n",
-                    (unsigned long long)rid, result, g_inspect_result);
+    if (kind == OpKind::Inspect || kind == OpKind::CallPred) {
+        const bool cpk = (kind == OpKind::CallPred);
+        char buf[1200];
+        _snprintf_s(buf, _TRUNCATE, "[%s]\nrequest_id=%llu\nresult=%s\n%s\n",
+                    cpk ? "callpred" : "inspect", (unsigned long long)rid, result, g_inspect_result);
         wchar_t ip[MAX_PATH * 2];
-        _snwprintf_s(ip, _TRUNCATE, L"%ls\\data\\native-inspect.ini", g_root);
+        _snwprintf_s(ip, _TRUNCATE, L"%ls\\data\\%ls", g_root,
+                     cpk ? L"native-callpred.ini" : L"native-inspect.ini");
         write_atomic(ip, buf);
-        write_response(rid, "inspected", g_inspect_result);
-        write_status("armed", rid, "inspected");
+        write_response(rid, cpk ? "callpred" : "inspected", g_inspect_result);
+        write_status("armed", rid, cpk ? "callpred" : "inspected");
         return;
     }
     bool called = strcmp(result, "process-event-returned") == 0;

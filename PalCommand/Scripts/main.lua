@@ -393,6 +393,20 @@ local function boot()
             end
             if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
         end)
+        -- observe r12b live (calls the predicate chain read-only) -- Codex step
+        for _, delay in ipairs({ 40000, 52000 }) do
+            ExecuteWithDelay(delay, function()
+                local function go()
+                    if not (engine.native_ready and engine.native_ready() and engine.request_callpred) then return end
+                    local st = discovery.station_for("Pal_crystal_S")
+                    if st and st.obj then
+                        local okk, err = engine.request_callpred(st.obj)
+                        util.log("r12b callpred: " .. tostring(okk) .. " " .. tostring(err))
+                    end
+                end
+                if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
+            end)
+        end
     end
     schedule_loop()
     schedule_native_poll()

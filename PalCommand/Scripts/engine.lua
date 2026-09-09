@@ -247,7 +247,13 @@ end
 
 --- Diagnostic (Codex step 3): ask the bridge to walk the r12b chain for a station.
 --- Result lands in data/native-inspect.ini. Reaped by M.native_tick().
-M.INSPECT_OBJA_FN = "142EA97D0"   -- rva 0x2EA97D0 + exe base 0x140000000 (Wine, deterministic)
+--- All addresses are exe-base (0x140000000) + rva; Wine = no ASLR = deterministic.
+--- Disasm sources: notes/para-codex-03..06.md.
+M.INSPECT_OBJA_FN = "142EA97D0"   -- 0x2EA97D0  getObjA(station) module getter
+M.CP_SUB_FN       = "142F2D830"   -- 0x2F2D830  objA -> *(objA+0x78) resolver (out param)
+M.CP_SENTINEL     = "148BE8AC0"   -- global compared against [elem+0x12C] in virt_2B8
+M.CP_VIRT_OFF     = "2B8"         -- vtable slot of virt_2B8 on sub
+
 function M.request_inspect(station_obj)
     if M._native_pending then return false, "busy" end
     local L = M.resolve_layout()
@@ -271,6 +277,34 @@ function M.request_inspect(station_obj)
     return true
 end
 
+--- Diagnostic: run the r12b predicate chain for real (read-only) and report the
+--- bool + the sub+0x70 assignment array. Result -> data/native-callpred.ini.
+function M.request_callpred(station_obj)
+    if M._native_pending then return false, "busy" end
+    local L = M.resolve_layout()
+    if not L or not L.trigger_addr then return false, "no layout" end
+    local st_addr = ok(function() return station_obj:GetAddress() end)
+    if not st_addr then return false, "no station addr" end
+    local p = native_paths()
+    M._req_seq = M._req_seq + 1
+    local rid = os.time() * 1000 + (M._req_seq % 1000)
+    local body = table.concat({
+        "[request]", "complete=1", "request_id=" .. rid, "operation=callpred",
+        string.format("trigger_function=%X", L.trigger_addr),
+        string.format("station=%X", st_addr),
+        "objA_fn=" .. M.INSPECT_OBJA_FN,
+        "sub_fn=" .. M.CP_SUB_FN,
+        "sentinel_addr=" .. M.CP_SENTINEL,
+        "virt_off=" .. M.CP_VIRT_OFF,
+        "",
+    }, "\n")
+    if not util.write_file(p.request, body) then return false, "write failed" end
+    M._native_pending = { rid = rid, station = station_obj, at = os.time(), pokes = 0, is_callpred = true }
+    poke_trigger(station_obj)
+    util.log("native callpred requested for station " .. string.format("%X", st_addr))
+    return true
+end
+
 --- Poke the trigger + reap the bridge response. Cheap; safe to call ~1x/sec from
 --- the game thread. Resolves M._native_pending via M._on_result.
 function M.native_tick()
@@ -287,10 +321,11 @@ function M.native_tick()
     if raw and raw:match("request_id%s*=%s*" .. pend.rid) then
         local status = raw:match("status%s*=%s*([%w%-]+)")
         local detail = raw:match("detail%s*=%s*([^\r\n]*)")
-        if pend.is_inspect then
-            if status == "inspected" or (status and status ~= "call-armed") then
+        if pend.is_inspect or pend.is_callpred then
+            local kind = pend.is_callpred and "callpred" or "inspect"
+            if status == "inspected" or status == "callpred" or (status and status ~= "call-armed") then
                 M._native_pending = nil
-                util.log("native inspect: " .. tostring(detail))
+                util.log("native " .. kind .. ": " .. tostring(detail))
             end
             return
         end
@@ -338,6 +373,12 @@ function M.native_tick()
             end
             return
         end
+    end
+
+    if (pend.is_inspect or pend.is_callpred) and os.time() - pend.at > 20 then
+        M._native_pending = nil
+        util.log("native " .. (pend.is_callpred and "callpred" or "inspect") .. ": timeout after " .. pend.pokes .. " pokes")
+        return
     end
 
     if os.time() - pend.at > 25 then
