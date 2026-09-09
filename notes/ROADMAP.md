@@ -43,7 +43,7 @@ Native backend, works whenever ANY player is online (AFK, never crafts).
 - [ ] 1.6 Stress: full queue (8+), verify drain, timing, and that joins never block
 - [ ] 1.7 Replay fallback still correct when native is off (same-length recipe ids)
 - [x] 1.8 Targeting: an explicit machine `target` is a HARD PIN.
-      <!-- done 2026-09-09 (code, deploy pending): user settled it -- picking a machine
+      <!-- done 2026-09-09 (code 62bc06d, DEPLOYED to server, restart pending): user settled it -- picking a machine
       means "use THIS machine". engine.M.place: if `target` (mapId / "key#index" / key)
       resolves to >=1 live machine, restrict candidates to ONLY those; if all busy ->
       soft-wait (stays queued, retried each scan; FIFO falls out of queue order, and a
@@ -149,3 +149,7 @@ PlayerController (Codex).
 - Native DLL: GitHub Actions builds it; `gh run download <id>` → copy into `PalCommand/dlls/main.dll` → commit.
 - Restart cost: ~60-90s boot. Mod one-shots fire 12-20s after "PalCommand loading".
 - Bridge `dump` op needs a **numeric** `request_id` (underscore = ignored).
+- Server was HEAVILY modded (see [[palworld-command-center]]). 2026-09-09 cleanup: PBA
+  disabled (deleted its `enabled.txt`), removed CCProbe / PalworldMobileBridge /
+  StockSnapshotBridge / RosterProbe. PBA was the lag culprit + fought PalCommand for
+  the same stations. DatHost API `DELETE /files/<path>` works (folders too, not blocked).
