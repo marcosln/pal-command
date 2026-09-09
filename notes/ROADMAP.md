@@ -94,6 +94,15 @@ in the app; never "deploy your own Worker". Two connection paths, offered in the
 - [ ] 4.6 PWA order flow: create → shows "placed" from state.json
 - [ ] 4.7 PWA rules editor
 - [ ] 4.8 Onboarding: "connect your server" — pick path, paste key/token, verify, done. One time.
+      The hard part isn't the token — it's getting the mod ONTO the server:
+      * DatHost (+ API key): near-zero-touch — the app can toggle UE4SS on and
+        upload the PalCommand mod folder itself via the API, then configure it.
+        User only pastes a key.
+      * Other hosts / self-host: user installs the mod manually (standard UE4SS
+        mod install — a documented ~10-min step), then connects. Ship a short
+        install guide + the packaged mod zip (5.2).
+      RCON is not a shortcut: Palworld RCON has no inventory/crafting verbs, the
+      mod is required either way.
 
 ## STAGE 5 — Polish + publish
 
@@ -110,15 +119,16 @@ guideline 4.2 ("not just a web view"). Name already avoids the Palworld trademar
 - [ ] 5.2 Mod packaging + install README for strangers
 - [ ] 5.3 Publish mod (Nexus)
 - [ ] 5.4 Capacitor wrap → TestFlight → App Store submission (needs the Apple Developer account)
-- [ ] 5.5 **LICENSE + credits before publishing.** Repo has no LICENSE (pick MIT).
-      `json.lua` / `discovery.lua` say "derived from / mirrors PalworldMobileBridge"
-      — establish what that project is + its license (comments were written by
-      Codex, not verified); either add proper attribution or confirm it's our own
-      independent implementation and soften the comments. `json.lua` structure is
-      NOT rxi/json.lua (different design). PBA ("Palworld Base Automation", Nexus
-      mod 3691) is prior art for the *idea* only — no PBA code in our mod (grep
-      clean) — but a gracious "an alternative to PBA" nod in the README is good
-      community form, not an obligation.
+- [ ] 5.5 **LICENSE + tidy comments before publishing.** Repo has no LICENSE (pick MIT).
+      "PalworldMobileBridge" in `json.lua` / `discovery.lua` = Codex's own earlier
+      working name for THIS project (per user 2026-09-09), not a third party →
+      **no external attribution owed.** Just reword those comments (they point to
+      nothing a reader can find and imply an external dep that doesn't exist);
+      the storage-reflection path + minimal JSON encoder are the obvious
+      implementations, not copyrightable expression. PBA ("Palworld Base
+      Automation", Nexus mod 3691) is prior art for the *idea* only — no PBA code
+      in our mod (grep clean); a "an alternative to PBA" nod in the README is
+      nice-to-have, not required.
 
 ## DEFERRED — Zero-player autonomy
 
