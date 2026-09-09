@@ -302,6 +302,27 @@ local function schedule_loop()
     util.log("WARN: no repeating timer API; scan runs once at startup only")
 end
 
+-- Fast, light loop: pokes the native trigger + reaps the bridge response while a
+-- native order is in flight. A no-op (single nil check) when nothing is pending,
+-- so it is safe to run at ~1.5 Hz without touching the game thread otherwise.
+local function schedule_native_poll()
+    if type(engine.native_tick) ~= "function" then return end
+    local function tick_once()
+        if type(ExecuteInGameThread) == "function" then
+            ExecuteInGameThread(function() pcall(engine.native_tick) end)
+        else
+            pcall(engine.native_tick)
+        end
+    end
+    if type(LoopAsync) == "function" then
+        LoopAsync(650, function() tick_once(); return false end)
+        util.log("native poll: LoopAsync every 650ms")
+    elseif type(ExecuteWithDelay) == "function" then
+        local function again() tick_once(); ExecuteWithDelay(650, again) end
+        ExecuteWithDelay(650, again)
+    end
+end
+
 --- Pull immediate orders (cheap: one file read). Called before every flush.
 local function refresh_orders()
     return pcall(ingest_orders)
@@ -329,6 +350,7 @@ local function boot()
         end)
     end
     schedule_loop()
+    schedule_native_poll()
 end
 
 -- Small console surface for debugging.

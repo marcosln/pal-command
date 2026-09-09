@@ -40,7 +40,7 @@
 
 static constexpr uint32_t kMaxArchiveBytes = 512;
 static constexpr uint32_t kMaxParamsBytes  = 256;
-static constexpr DWORD    kPollIntervalMs  = 5;
+static constexpr DWORD    kPollIntervalMs  = 2;
 
 // ---------------------------------------------------------------- UE4SS ABI
 
@@ -116,6 +116,13 @@ static PendingCall  g_pending;
 static const char*  g_last_result = "none";
 static uint64_t     g_last_seen_request = 0;
 
+// instrumentation -- surfaced in native-status.ini so a stuck call is diagnosable
+static std::atomic<uint32_t> g_arm_count{0};       // requests armed
+static std::atomic<uint32_t> g_hook_fire_count{0}; // trigger pre-hook entered
+static std::atomic<uint32_t> g_exec_count{0};      // execute_pending_on_game_thread ran to ProcessEvent
+static std::atomic<int>      g_trigger_raw_id{-999};
+static const char*           g_trigger_detail = "not-armed";
+
 // ---------------------------------------------------------------- helpers
 
 static bool append_child(wchar_t* dst, size_t cap, const wchar_t* root, const wchar_t* name) {
@@ -148,11 +155,15 @@ static void write_atomic(const wchar_t* path, const char* text) {
 }
 
 static void write_status(const char* state, uint64_t rid, const char* detail) {
-    char buf[512];
+    char buf[640];
     _snprintf_s(buf, _TRUNCATE,
-                "[bridge]\nversion=%d\nstate=%s\nrequest_id=%llu\nue4ss_sha=%s\ndetail=%s\n",
+                "[bridge]\nversion=%d\nstate=%s\nrequest_id=%llu\nue4ss_sha=%s\ndetail=%s\n"
+                "arms=%u\nhook_fires=%u\nexecs=%u\ntrigger_id=%d\ntrigger_detail=%s\npending=%d\n",
                 PALCOMMAND_BRIDGE_VERSION, state, (unsigned long long)rid,
-                PALCOMMAND_UE4SS_SHA, detail ? detail : "none");
+                PALCOMMAND_UE4SS_SHA, detail ? detail : "none",
+                g_arm_count.load(), g_hook_fire_count.load(), g_exec_count.load(),
+                g_trigger_raw_id.load(), g_trigger_detail,
+                (int)g_pending_state.load());
     write_atomic(g_status_path, buf);
 }
 
@@ -229,9 +240,21 @@ static bool parse_hex(const char* hex, uint8_t* out, uint32_t* count) {
 
 // ---------------------------------------------------------------- the game-thread callback
 
+// SEH-guarded so a bad frame is reported, not a silent crash. Kept in its own
+// leaf function (no C++ objects) so __try/__except is legal here.
+static const char* invoke_process_event(void* obj, void* fn, void* params) {
+    __try {
+        g_process_event(obj, fn, params);
+        return "process-event-returned";
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return "process-event-crashed";
+    }
+}
+
 static void execute_pending_on_game_thread() {
     PendingState expected = PendingState::Armed;
     if (!g_pending_state.compare_exchange_strong(expected, PendingState::Executing)) return;
+    g_exec_count.fetch_add(1);
 
     PendingCall call;
     EnterCriticalSection(&g_lock);
@@ -256,8 +279,7 @@ static void execute_pending_on_game_thread() {
         arr->data = call.bytes;                       // read-only; ProcessEvent deep-copies
         arr->num  = (int32_t)call.byte_count;
         arr->max  = (int32_t)call.byte_count;
-        g_process_event(call.station, call.function, params);
-        result = "process-event-returned";
+        result = invoke_process_event(call.station, call.function, params);
     }
 
     EnterCriticalSection(&g_lock);
@@ -277,12 +299,17 @@ static bool ensure_trigger(void* trigger, const char** err) {
         g_trigger_hooked = false;
         g_trigger_fn = nullptr;
     }
-    static HookCallback cb = [](CallableContext&, void*) { execute_pending_on_game_thread(); };
+    static HookCallback cb = [](CallableContext&, void*) {
+        g_hook_fire_count.fetch_add(1);
+        execute_pending_on_game_thread();
+    };
     int id = g_register_pre_hook(trigger, cb, nullptr);
-    if (id < 0) { *err = "hook-register-failed"; return false; }
+    g_trigger_raw_id.store(id);
+    if (id < 0) { *err = "hook-register-failed"; g_trigger_detail = "register-returned-negative"; return false; }
     g_trigger_fn = trigger;
     g_trigger_id = id;
     g_trigger_hooked = true;
+    g_trigger_detail = "registered";
     return true;
 }
 
@@ -341,6 +368,7 @@ static void handle_request() {
     g_pending = c;
     g_last_result = "none";
     LeaveCriticalSection(&g_lock);
+    g_arm_count.fetch_add(1);
     write_response(rid, "call-armed", "waiting-for-game-thread");
     write_status("call-armed", rid, "waiting-for-game-thread");
 }
@@ -363,9 +391,18 @@ static void reap_done() {
 
 static DWORD WINAPI worker(LPVOID) {
     write_status("ready", 0, g_resolve_detail);
+    uint32_t tick = 0;
     while (WaitForSingleObject(g_stop_event, kPollIntervalMs) == WAIT_TIMEOUT) {
         reap_done();
         handle_request();
+        // refresh the status file ~1x/sec so counters are observable even while armed
+        if ((++tick % 500) == 0) {
+            PendingState ps = g_pending_state.load();
+            const char* s = ps == PendingState::Idle ? "ready"
+                          : ps == PendingState::Armed ? "call-armed"
+                          : ps == PendingState::Executing ? "executing" : "done";
+            write_status(s, g_pending.request_id, g_last_result);
+        }
     }
     reap_done();
     return 0;

@@ -87,16 +87,30 @@ local function native_paths()
     }
 end
 
-function M.native_status()
+function M.native_status_raw()
     local p = native_paths()
     if not p then return nil end
-    local raw = util.read_file(p.status)
+    return util.read_file(p.status)
+end
+
+function M.native_status()
+    local raw = M.native_status_raw()
     if not raw then return nil end
     return raw:match("state%s*=%s*([%w%-]+)")
 end
 
+--- Bridge counters from native-status.ini (arms / hook_fires / execs / trigger).
+function M.native_diag()
+    local raw = M.native_status_raw()
+    if not raw then return nil end
+    local d = {}
+    for k, v in raw:gmatch("([%w_]+)%s*=%s*([^\r\n]*)") do d[k] = v end
+    return d
+end
+
 function M.native_ready()
-    return M.native_status() == "ready" or M.native_status() == "armed" or M.native_status() == "call-armed"
+    local s = M.native_status()
+    return s == "ready" or s == "armed" or s == "call-armed" or s == "executing" or s == "done"
 end
 
 local function hex_of(arr)
@@ -105,8 +119,18 @@ local function hex_of(arr)
     return table.concat(t)
 end
 
---- Place one order through the native bridge. Blocks briefly for the response.
-local function native_place(station_obj, pid, want)
+-- One native order can be in flight at a time. The bridge arms on the request
+-- file, then needs the trigger UFunction (GetCurrentRecipeId) invoked ON THE GAME
+-- THREAD to run ProcessEvent. We must not block the game thread waiting, so the
+-- request is *submitted* here and *reaped* by M.native_tick() on a fast timer.
+M._native_pending = nil   -- { rid, station, order, at, pokes }
+
+local function poke_trigger(station_obj)
+    pcall(function() if station_obj then station_obj:GetCurrentRecipeId() end end)
+end
+
+--- Submit one order to the bridge. Returns true if the request was written.
+local function native_submit(station_obj, pid, want, order)
     local L, lerr = M.resolve_layout()
     if not L then return false, "layout: " .. tostring(lerr) end
     if not L.trigger_addr then return false, "trigger UFunction unavailable" end
@@ -135,25 +159,59 @@ local function native_place(station_obj, pid, want)
         "",
     }, "\n")
 
-    local wrote = util.write_file(p.request, body)
-    if not wrote then return false, "could not write native-request.ini" end
+    if not util.write_file(p.request, body) then return false, "could not write native-request.ini" end
 
-    -- poke the trigger: fires the bridge's pre-hook on the game thread
-    pcall(function() station_obj:GetCurrentRecipeId() end)
+    M._native_pending = { rid = rid, station = station_obj, order = order, at = os.time(), pokes = 0 }
+    poke_trigger(station_obj)
+    return true
+end
 
-    -- wait for the response (bridge polls every ~5ms; the hook may need a tick)
-    for _ = 1, 40 do
-        local raw = util.read_file(p.response)
-        if raw and raw:match("request_id%s*=%s*" .. rid) then
-            local status = raw:match("status%s*=%s*([%w%-]+)")
-            local detail = raw:match("detail%s*=%s*([^\r\n]*)")
-            if status == "called" then return true, "native: " .. tostring(detail) end
-            if status and status ~= "call-armed" then return false, "native: " .. tostring(status) .. " " .. tostring(detail) end
+--- Poke the trigger + reap the bridge response. Cheap; safe to call ~1x/sec from
+--- the game thread. Resolves M._native_pending via M._on_result.
+function M.native_tick()
+    if M._flushing then return end
+    local pend = M._native_pending
+    if not pend then return end
+    local p = native_paths()
+    if not p then return end
+
+    pend.pokes = pend.pokes + 1
+    poke_trigger(valid(pend.station) and pend.station or nil)
+
+    local raw = util.read_file(p.response)
+    if raw and raw:match("request_id%s*=%s*" .. pend.rid) then
+        local status = raw:match("status%s*=%s*([%w%-]+)")
+        local detail = raw:match("detail%s*=%s*([^\r\n]*)")
+        if status == "called" then
+            M._native_pending = nil
+            M._stats.placed = M._stats.placed + 1
+            util.log(string.format("native: %s x%s placed after %d pokes (%s)",
+                tostring(pend.order.recipe), tostring(pend.order.count), pend.pokes, tostring(detail)))
+            if type(M._on_result) == "function" then
+                pcall(M._on_result, pend.order, true, "native: " .. tostring(detail), false)
+            end
+            return
+        elseif status and status ~= "call-armed" then
+            M._native_pending = nil
+            M._stats.failed = M._stats.failed + 1
+            M._stats.lastError = "native: " .. tostring(status) .. " " .. tostring(detail)
+            if type(M._on_result) == "function" then
+                pcall(M._on_result, pend.order, false, M._stats.lastError, false)
+            end
+            return
         end
-        -- second poke in case the first missed the arm window
-        pcall(function() station_obj:GetCurrentRecipeId() end)
     end
-    return false, "native bridge did not confirm (timeout)"
+
+    if os.time() - pend.at > 25 then
+        local order = pend.order
+        M._native_pending = nil
+        M._stats.failed = M._stats.failed + 1
+        M._stats.lastError = "native: no confirm after " .. pend.pokes .. " pokes / " .. (os.time() - pend.at) .. "s"
+        util.log(M._stats.lastError)
+        if type(M._on_result) == "function" then
+            pcall(M._on_result, order, false, M._stats.lastError, false)
+        end
+    end
 end
 
 -- ---------------------------------------------------------------- replay backend
@@ -211,10 +269,16 @@ function M.place(order, ctx)
     local pid = (ctx and ctx.pid) or discovery.any_player_id() or 0
 
     if M.native_ready() then
-        local placed, detail = native_place(station.obj, pid, want)
-        if placed then return true, string.format("%s x%d @ %s (%s)", recipe, count, station.baseName, detail) end
-        if not (ctx and ctx.archive) then return false, detail end
-        util.log("native failed (" .. tostring(detail) .. "); trying replay")
+        if M._native_pending then
+            -- one native order in flight; M.native_tick() will clear it
+            return false, "native: bridge busy with " .. tostring(M._native_pending.order and M._native_pending.order.recipe), true
+        end
+        local okk, serr = native_submit(station.obj, pid, want, order)
+        if okk then
+            return false, string.format("native: submitted %s x%d @ %s (awaiting game thread)", recipe, count, station.baseName), true
+        end
+        if not (ctx and ctx.archive) then return false, "native: " .. tostring(serr) end
+        util.log("native submit failed (" .. tostring(serr) .. "); trying replay")
     end
 
     local archive = ctx and ctx.archive
@@ -290,6 +354,12 @@ function M.stats()
     s.backend = M.backend()
     s.hooked = M._hooked
     s.nativeStatus = M.native_status()
+    s.nativeDiag = M.native_diag()
+    s.nativePending = M._native_pending and {
+        recipe = M._native_pending.order and M._native_pending.order.recipe,
+        rid = M._native_pending.rid, pokes = M._native_pending.pokes,
+        age = os.time() - M._native_pending.at,
+    } or nil
     s.layout = M._layout
     return s
 end
