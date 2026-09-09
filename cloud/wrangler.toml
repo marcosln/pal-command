@@ -10,7 +10,7 @@ assets = { directory = "./public", binding = "ASSETS" }
 # then paste the printed id below.
 [[kv_namespaces]]
 binding = "CACHE"
-id = "PASTE_KV_ID_HERE"
+id = "d333d66e98c842b298584ec8c8923348"
 
 [vars]
 SNAPSHOT_TTL_SECONDS = "15"
