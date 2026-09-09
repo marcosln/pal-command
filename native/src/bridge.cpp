@@ -1,0 +1,438 @@
+// PalCommand native bridge -- the one operation UE4SS-Lua cannot do (issue #378):
+// construct an FPalNetArchive parameter and dispatch a UFunction with it.
+//
+// Design
+// ------
+//   * Loaded by UE4SS as a C++ mod (PalCommand/dlls/main.dll).
+//   * Resolves the handful of UE4SS.dll exports it needs by *mangled name* via
+//     GetProcAddress -- no linking against UE4SS, no RE-UE4SS source tree, no
+//     UEPseudo, no Epic account. Built with MSVC / clang-cl so std::function is
+//     ABI-identical to the one UE4SS.dll expects.
+//   * Verifies it is running against the exact UE4SS build it was written for
+//     (SHA in the DLL path). On any mismatch it disables itself and does nothing.
+//   * A background thread polls a request file written by the Lua side. A pre-hook
+//     on a harmless getter (PalMapObjectConvertItemModel:GetCurrentRecipeId) gives
+//     us a callback that always runs on the game thread; that is where we build
+//     the parameter frame and call ProcessEvent.
+//   * Parameter offsets are supplied by the Lua side (from live reflection), never
+//     hard-coded, so a Palworld layout change is a Lua-only fix.
+//
+// Memory: ProcessEvent deep-copies the parameter block (CopyCompleteValue) into
+// its own frame before invoking and destroys only that copy, so pointing the
+// archive's FScriptArray at a local buffer is safe -- UE never frees it.
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <cstdint>
+#include <cstring>
+#include <cstdio>
+#include <atomic>
+#include <functional>
+#include <string>
+
+// ---------------------------------------------------------------- config
+
+#ifndef PALCOMMAND_UE4SS_SHA
+#define PALCOMMAND_UE4SS_SHA "ba2efd55"
+#endif
+#define PALCOMMAND_BRIDGE_VERSION 1
+
+static constexpr uint32_t kMaxArchiveBytes = 512;
+static constexpr uint32_t kMaxParamsBytes  = 256;
+static constexpr DWORD    kPollIntervalMs  = 5;
+
+// ---------------------------------------------------------------- UE4SS ABI
+
+// Opaque; we never dereference it. Only needed so the std::function signature
+// matches the one UE4SS.dll was compiled with (type-erased, so layout is the
+// same regardless, but keep it honest).
+namespace RC::Unreal { class UnrealScriptFunctionCallableContext; }
+using CallableContext = RC::Unreal::UnrealScriptFunctionCallableContext;
+using HookCallback = std::function<void(CallableContext&, void*)>;
+
+using Fn_CppUserModCtor  = void (*)(void* self);
+using Fn_CppUserModDtor  = void (*)(void* self);
+using Fn_ProcessEvent    = void (*)(void* object, void* function, void* params);
+using Fn_RegisterPreHook  = int  (*)(void* ufunction, const HookCallback& cb, void* custom_data);
+using Fn_UnregisterHook  = bool (*)(void* ufunction, int callback_id);
+
+// TArray's header: { data ptr, int32 num, int32 max }. 16 bytes on x64.
+struct FScriptArrayHeader {
+    void*   data;
+    int32_t num;
+    int32_t max;
+};
+
+// mangled names verified against UE4SS.dll (SHA ba2efd55) export table
+static const char* kSym_Ctor           = "??0CppUserModBase@RC@@QEAA@XZ";
+static const char* kSym_Dtor           = "??1CppUserModBase@RC@@UEAA@XZ";
+static const char* kSym_ProcessEvent   = "?ProcessEvent@UObject@Unreal@RC@@QEAAXPEAVUFunction@23@PEAX@Z";
+static const char* kSym_RegisterPreHook = "?RegisterPreHook@UFunction@Unreal@RC@@QEAAHAEBV?$function@$$A6AXAEAVUnrealScriptFunctionCallableContext@Unreal@RC@@PEAX@Z@std@@PEAX@Z";
+static const char* kSym_UnregisterHook = "?UnregisterHook@UFunction@Unreal@RC@@QEAA_NH@Z";
+
+// ---------------------------------------------------------------- globals
+
+static HMODULE            g_module = nullptr;
+static HMODULE            g_ue4ss = nullptr;
+static void*              g_mod_object = nullptr;
+static Fn_CppUserModDtor  g_dtor = nullptr;
+static Fn_ProcessEvent    g_process_event = nullptr;
+static Fn_RegisterPreHook g_register_pre_hook = nullptr;
+static Fn_UnregisterHook  g_unregister_hook = nullptr;
+
+static HANDLE             g_stop_event = nullptr;
+static HANDLE             g_worker = nullptr;
+static CRITICAL_SECTION   g_lock;
+static bool               g_lock_ready = false;
+
+static wchar_t            g_root[MAX_PATH * 2];
+static wchar_t            g_request_path[MAX_PATH * 2];
+static wchar_t            g_response_path[MAX_PATH * 2];
+static wchar_t            g_status_path[MAX_PATH * 2];
+
+static void*              g_trigger_fn = nullptr;
+static int                g_trigger_id = -1;
+static bool               g_trigger_hooked = false;
+
+enum class PendingState { Idle, Armed, Executing, Done };
+
+struct PendingCall {
+    uint64_t request_id = 0;
+    void*    station = nullptr;
+    void*    function = nullptr;
+    int32_t  player_id = 0;
+    uint32_t player_offset = 0;
+    uint32_t archive_offset = 0;
+    uint32_t bytes_offset = 0;      // FScriptArray header offset within the struct
+    uint32_t params_size = 0;
+    uint32_t byte_count = 0;
+    uint8_t  bytes[kMaxArchiveBytes] = {0};
+};
+
+static std::atomic<PendingState> g_pending_state{PendingState::Idle};
+static PendingCall  g_pending;
+static const char*  g_last_result = "none";
+static uint64_t     g_last_seen_request = 0;
+
+// ---------------------------------------------------------------- helpers
+
+static bool append_child(wchar_t* dst, size_t cap, const wchar_t* root, const wchar_t* name) {
+    int n = _snwprintf_s(dst, cap, _TRUNCATE, L"%ls\\%ls", root, name);
+    return n > 0;
+}
+
+static bool init_paths() {
+    DWORD len = GetModuleFileNameW(g_module, g_root, (DWORD)(sizeof(g_root) / sizeof(wchar_t)));
+    if (len == 0 || len >= sizeof(g_root) / sizeof(wchar_t)) return false;
+    // .../PalCommand/dlls/main.dll -> strip file, strip "dlls"
+    wchar_t* p = wcsrchr(g_root, L'\\'); if (!p) return false; *p = 0;
+    p = wcsrchr(g_root, L'\\'); if (!p) return false; *p = 0;
+    return append_child(g_request_path, sizeof(g_request_path) / sizeof(wchar_t), g_root, L"data\\native-request.ini")
+        && append_child(g_response_path, sizeof(g_response_path) / sizeof(wchar_t), g_root, L"data\\native-response.ini")
+        && append_child(g_status_path, sizeof(g_status_path) / sizeof(wchar_t), g_root, L"data\\native-status.ini");
+}
+
+static void write_atomic(const wchar_t* path, const char* text) {
+    wchar_t tmp[MAX_PATH * 2];
+    _snwprintf_s(tmp, _TRUNCATE, L"%ls.tmp", path);
+    HANDLE h = CreateFileW(tmp, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD want = (DWORD)strlen(text), got = 0;
+    bool ok = WriteFile(h, text, want, &got, nullptr) && got == want && FlushFileBuffers(h);
+    CloseHandle(h);
+    if (ok) MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    else DeleteFileW(tmp);
+}
+
+static void write_status(const char* state, uint64_t rid, const char* detail) {
+    char buf[512];
+    _snprintf_s(buf, _TRUNCATE,
+                "[bridge]\nversion=%d\nstate=%s\nrequest_id=%llu\nue4ss_sha=%s\ndetail=%s\n",
+                PALCOMMAND_BRIDGE_VERSION, state, (unsigned long long)rid,
+                PALCOMMAND_UE4SS_SHA, detail ? detail : "none");
+    write_atomic(g_status_path, buf);
+}
+
+static void write_response(uint64_t rid, const char* status, const char* detail) {
+    char buf[512];
+    _snprintf_s(buf, _TRUNCATE,
+                "[bridge]\nversion=%d\nrequest_id=%llu\nstatus=%s\ndetail=%s\n",
+                PALCOMMAND_BRIDGE_VERSION, (unsigned long long)rid, status, detail ? detail : "none");
+    write_atomic(g_response_path, buf);
+}
+
+static bool readable(const void* addr, size_t bytes) {
+    if (!addr || !bytes) return false;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery(addr, &mbi, sizeof(mbi)) != sizeof(mbi)) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
+    uintptr_t start = (uintptr_t)addr;
+    uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    return start <= end && bytes <= end - start;
+}
+
+static bool dll_path_contains(HMODULE mod, const char* needle) {
+    wchar_t path[MAX_PATH * 2];
+    DWORD len = GetModuleFileNameW(mod, path, (DWORD)(sizeof(path) / sizeof(wchar_t)));
+    if (len == 0) return false;
+    char narrow[MAX_PATH * 2];
+    int n = WideCharToMultiByte(CP_UTF8, 0, path, -1, narrow, sizeof(narrow), nullptr, nullptr);
+    if (n <= 0) return false;
+    return strstr(narrow, needle) != nullptr;
+}
+
+// ---------------------------------------------------------------- ini parse
+
+static bool ini_str(const wchar_t* key, char* out, DWORD out_size) {
+    wchar_t wide[1024];
+    DWORD n = GetPrivateProfileStringW(L"request", key, L"", wide,
+                                       (DWORD)(sizeof(wide) / sizeof(wchar_t)), g_request_path);
+    if (n == 0 || n >= sizeof(wide) / sizeof(wchar_t) - 1) return false;
+    return WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, (int)out_size, nullptr, nullptr) > 0;
+}
+
+static uint64_t ini_u64(const wchar_t* key, int base, bool* ok) {
+    char v[64];
+    if (!ini_str(key, v, sizeof(v))) { *ok = false; return 0; }
+    char* end = nullptr;
+    unsigned long long r = _strtoui64(v, &end, base);
+    *ok = end && *end == '\0' && end != v;
+    return r;
+}
+
+static int64_t ini_i64(const wchar_t* key, bool* ok) {
+    char v[64];
+    if (!ini_str(key, v, sizeof(v))) { *ok = false; return 0; }
+    char* end = nullptr;
+    long long r = _strtoi64(v, &end, 10);
+    *ok = end && *end == '\0' && end != v;
+    return r;
+}
+
+static bool parse_hex(const char* hex, uint8_t* out, uint32_t* count) {
+    size_t len = strlen(hex);
+    if (len == 0 || (len & 1) || len > kMaxArchiveBytes * 2) return false;
+    for (size_t i = 0; i < len / 2; ++i) {
+        char pair[3] = { hex[2 * i], hex[2 * i + 1], 0 };
+        char* end = nullptr;
+        long v = strtol(pair, &end, 16);
+        if (*end || v < 0 || v > 255) return false;
+        out[i] = (uint8_t)v;
+    }
+    *count = (uint32_t)(len / 2);
+    return true;
+}
+
+// ---------------------------------------------------------------- the game-thread callback
+
+static void execute_pending_on_game_thread() {
+    PendingState expected = PendingState::Armed;
+    if (!g_pending_state.compare_exchange_strong(expected, PendingState::Executing)) return;
+
+    PendingCall call;
+    EnterCriticalSection(&g_lock);
+    call = g_pending;
+    LeaveCriticalSection(&g_lock);
+
+    const char* result = "unknown";
+    if (!readable(call.station, sizeof(void*))) {
+        result = "station-unreadable";
+    } else if (!readable(call.function, sizeof(void*))) {
+        result = "function-unreadable";
+    } else if (call.params_size == 0 || call.params_size > kMaxParamsBytes
+               || call.player_offset + sizeof(int32_t) > call.params_size
+               || call.archive_offset + call.bytes_offset + sizeof(FScriptArrayHeader) > call.params_size
+               || call.byte_count == 0 || call.byte_count > kMaxArchiveBytes) {
+        result = "layout-invalid";
+    } else {
+        alignas(16) uint8_t params[kMaxParamsBytes];
+        memset(params, 0, sizeof(params));
+        memcpy(params + call.player_offset, &call.player_id, sizeof(call.player_id));
+        auto* arr = reinterpret_cast<FScriptArrayHeader*>(params + call.archive_offset + call.bytes_offset);
+        arr->data = call.bytes;                       // read-only; ProcessEvent deep-copies
+        arr->num  = (int32_t)call.byte_count;
+        arr->max  = (int32_t)call.byte_count;
+        g_process_event(call.station, call.function, params);
+        result = "process-event-returned";
+    }
+
+    EnterCriticalSection(&g_lock);
+    g_last_result = result;
+    g_pending_state.store(PendingState::Done);
+    LeaveCriticalSection(&g_lock);
+}
+
+// ---------------------------------------------------------------- worker thread
+
+static bool ensure_trigger(void* trigger, const char** err) {
+    if (!readable(trigger, sizeof(void*))) { *err = "trigger-unreadable"; return false; }
+    if (g_trigger_hooked && g_trigger_fn == trigger) return true;
+    if (g_pending_state.load() != PendingState::Idle) { *err = "bridge-busy"; return false; }
+    if (g_trigger_hooked) {
+        g_unregister_hook(g_trigger_fn, g_trigger_id);
+        g_trigger_hooked = false;
+        g_trigger_fn = nullptr;
+    }
+    static HookCallback cb = [](CallableContext&, void*) { execute_pending_on_game_thread(); };
+    int id = g_register_pre_hook(trigger, cb, nullptr);
+    if (id < 0) { *err = "hook-register-failed"; return false; }
+    g_trigger_fn = trigger;
+    g_trigger_id = id;
+    g_trigger_hooked = true;
+    return true;
+}
+
+static void handle_request() {
+    bool ok = false;
+    if (GetPrivateProfileIntW(L"request", L"complete", 0, g_request_path) != 1) return;
+
+    uint64_t rid = ini_u64(L"request_id", 10, &ok);
+    if (!ok || rid == 0 || rid == g_last_seen_request) return;
+    g_last_seen_request = rid;
+
+    char op[16] = {0};
+    if (!ini_str(L"operation", op, sizeof(op))) { write_response(rid, "error", "operation-missing"); return; }
+
+    void* trigger = (void*)(uintptr_t)ini_u64(L"trigger_function", 16, &ok);
+    if (!ok || !trigger) { write_response(rid, "error", "trigger-missing"); return; }
+
+    const char* err = nullptr;
+    if (!ensure_trigger(trigger, &err)) { write_response(rid, "error", err); write_status("error", rid, err); return; }
+
+    if (strcmp(op, "arm") == 0) {
+        write_response(rid, "armed", "trigger-ready");
+        write_status("armed", rid, "trigger-ready");
+        return;
+    }
+    if (strcmp(op, "cancel") == 0) {
+        PendingState st = g_pending_state.load();
+        if (st == PendingState::Armed) g_pending_state.store(PendingState::Idle);
+        write_response(rid, "canceled", "");
+        return;
+    }
+    if (strcmp(op, "call") != 0) { write_response(rid, "error", "operation-invalid"); return; }
+
+    PendingCall c;
+    c.request_id = rid;
+    c.station  = (void*)(uintptr_t)ini_u64(L"station", 16, &ok);           if (!ok || !c.station)  { write_response(rid, "error", "station-invalid"); return; }
+    c.function = (void*)(uintptr_t)ini_u64(L"target_function", 16, &ok);   if (!ok || !c.function) { write_response(rid, "error", "target-function-invalid"); return; }
+    { int64_t p = ini_i64(L"player_id", &ok); if (!ok) { write_response(rid, "error", "player-id-invalid"); return; } c.player_id = (int32_t)p; }
+    c.player_offset  = (uint32_t)ini_u64(L"player_offset", 10, &ok);  if (!ok) { write_response(rid, "error", "player-offset-invalid"); return; }
+    c.archive_offset = (uint32_t)ini_u64(L"archive_offset", 10, &ok); if (!ok) { write_response(rid, "error", "archive-offset-invalid"); return; }
+    c.bytes_offset   = (uint32_t)ini_u64(L"bytes_offset", 10, &ok);   if (!ok) { write_response(rid, "error", "bytes-offset-invalid"); return; }
+    c.params_size    = (uint32_t)ini_u64(L"params_size", 10, &ok);    if (!ok) { write_response(rid, "error", "params-size-invalid"); return; }
+
+    char hex[kMaxArchiveBytes * 2 + 4] = {0};
+    if (!ini_str(L"archive_hex", hex, sizeof(hex)) || !parse_hex(hex, c.bytes, &c.byte_count)) {
+        write_response(rid, "error", "archive-hex-invalid");
+        return;
+    }
+
+    PendingState expected = PendingState::Idle;
+    if (!g_pending_state.compare_exchange_strong(expected, PendingState::Armed)) {
+        write_response(rid, "error", "bridge-busy");
+        return;
+    }
+    EnterCriticalSection(&g_lock);
+    g_pending = c;
+    g_last_result = "none";
+    LeaveCriticalSection(&g_lock);
+    write_response(rid, "call-armed", "waiting-for-game-thread");
+    write_status("call-armed", rid, "waiting-for-game-thread");
+}
+
+static void reap_done() {
+    if (g_pending_state.load() != PendingState::Done) return;
+    uint64_t rid;
+    const char* result;
+    EnterCriticalSection(&g_lock);
+    rid = g_pending.request_id;
+    result = g_last_result;
+    g_pending = PendingCall{};
+    g_last_result = "none";
+    LeaveCriticalSection(&g_lock);
+    g_pending_state.store(PendingState::Idle);
+    bool called = strcmp(result, "process-event-returned") == 0;
+    write_response(rid, called ? "called" : "error", result);
+    write_status("armed", rid, result);
+}
+
+static DWORD WINAPI worker(LPVOID) {
+    write_status("ready", 0, "worker-started");
+    while (WaitForSingleObject(g_stop_event, kPollIntervalMs) == WAIT_TIMEOUT) {
+        reap_done();
+        handle_request();
+    }
+    reap_done();
+    return 0;
+}
+
+// ---------------------------------------------------------------- symbol resolution
+
+static bool resolve_symbols(Fn_CppUserModCtor* ctor) {
+    g_ue4ss = GetModuleHandleW(L"UE4SS.dll");
+    if (!g_ue4ss) return false;
+    if (!dll_path_contains(g_ue4ss, PALCOMMAND_UE4SS_SHA)) return false;
+
+    *ctor               = (Fn_CppUserModCtor)  GetProcAddress(g_ue4ss, kSym_Ctor);
+    g_dtor              = (Fn_CppUserModDtor)  GetProcAddress(g_ue4ss, kSym_Dtor);
+    g_process_event     = (Fn_ProcessEvent)    GetProcAddress(g_ue4ss, kSym_ProcessEvent);
+    g_register_pre_hook = (Fn_RegisterPreHook) GetProcAddress(g_ue4ss, kSym_RegisterPreHook);
+    g_unregister_hook   = (Fn_UnregisterHook)  GetProcAddress(g_ue4ss, kSym_UnregisterHook);
+
+    return *ctor && g_dtor && g_process_event && g_register_pre_hook && g_unregister_hook;
+}
+
+// ---------------------------------------------------------------- entry points
+
+extern "C" __declspec(dllexport) void* start_mod() {
+    if (!init_paths()) return nullptr;
+
+    Fn_CppUserModCtor ctor = nullptr;
+    if (!resolve_symbols(&ctor)) {
+        write_status("disabled", 0, "ue4ss-build-or-symbol-mismatch");
+        return nullptr;
+    }
+
+    // A CppUserModBase-shaped object so UE4SS's virtual calls (on_update, ...) land
+    // on the exported base's empty defaults. 4 KiB is far more than the real size.
+    g_mod_object = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4096);
+    if (!g_mod_object) { write_status("disabled", 0, "alloc-failed"); return nullptr; }
+    ctor(g_mod_object);
+
+    InitializeCriticalSection(&g_lock);
+    g_lock_ready = true;
+    g_pending_state.store(PendingState::Idle);
+
+    g_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (g_stop_event) g_worker = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
+    if (!g_worker) write_status("disabled", 0, "worker-thread-failed");
+    else write_status("ready", 0, "started");
+
+    return g_mod_object;
+}
+
+extern "C" __declspec(dllexport) void uninstall_mod(void* mod) {
+    if (g_stop_event) SetEvent(g_stop_event);
+    if (g_worker) { WaitForSingleObject(g_worker, 3000); CloseHandle(g_worker); g_worker = nullptr; }
+    if (g_stop_event) { CloseHandle(g_stop_event); g_stop_event = nullptr; }
+    if (g_trigger_hooked && g_unregister_hook) {
+        g_unregister_hook(g_trigger_fn, g_trigger_id);
+        g_trigger_hooked = false;
+    }
+    if (g_lock_ready) { DeleteCriticalSection(&g_lock); g_lock_ready = false; }
+    if (mod && g_dtor) g_dtor(mod);
+    if (mod) HeapFree(GetProcessHeap(), 0, mod);
+    g_mod_object = nullptr;
+}
+
+BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        g_module = inst;
+        DisableThreadLibraryCalls(inst);
+    }
+    return TRUE;
+}

@@ -1,0 +1,66 @@
+name: Build native bridge
+
+on:
+  push:
+    paths:
+      - "native/**"
+      - ".github/workflows/native-build.yml"
+  workflow_dispatch:
+    inputs:
+      ue4ss_sha:
+        description: "UE4SS build SHA the bridge targets (path check)"
+        required: false
+        default: "ba2efd55"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Compile main.dll
+        shell: cmd
+        run: |
+          set SHA=${{ github.event.inputs.ue4ss_sha }}
+          if "%SHA%"=="" set SHA=ba2efd55
+          mkdir out
+          cl /nologo /LD /EHsc /std:c++17 /O2 /MD /utf-8 ^
+            /DPALCOMMAND_UE4SS_SHA=\"%SHA%\" ^
+            /Fe:out\main.dll ^
+            native\src\bridge.cpp ^
+            /link /DLL kernel32.lib user32.lib
+          dir out
+
+      - name: Verify exports
+        shell: pwsh
+        run: |
+          $dumpbin = (Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1).FullName
+          & $dumpbin /EXPORTS out\main.dll
+          $out = & $dumpbin /EXPORTS out\main.dll | Out-String
+          if ($out -notmatch "start_mod" -or $out -notmatch "uninstall_mod") {
+            Write-Error "main.dll is missing start_mod / uninstall_mod"
+            exit 1
+          }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "package\PalCommand\dlls" | Out-Null
+          Copy-Item out\main.dll "package\PalCommand\dlls\main.dll"
+          "PalCommand native bridge`nUE4SS SHA target: ${{ github.event.inputs.ue4ss_sha || 'ba2efd55' }}`nbuilt: $(Get-Date -Format o)" |
+            Set-Content "package\PalCommand\dlls\BUILD.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PalCommand-native-dll
+          path: package/**
+          retention-days: 30
+          if-no-files-found: error

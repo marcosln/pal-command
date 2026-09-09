@@ -1,0 +1,13 @@
+{
+  "name": "Pal Command",
+  "short_name": "Pal Command",
+  "description": "Ve el inventario de tu server de Palworld y manda órdenes de fabricación desde el teléfono.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0f14",
+  "theme_color": "#0b0f14",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

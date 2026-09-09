@@ -1,0 +1,691 @@
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" />
+<title>Pal Command</title>
+<style>
+  /* ---- tokens : light (bare :root) ---------------------------------- */
+  :root {
+    --ground: #efe9db;
+    --panel: #f9f4e9;
+    --panel-2: #f1ead9;
+    --line: #ddd2bd;
+    --line-strong: #c9bda3;
+    --text: #221d15;
+    --dim: #6f6656;
+    --accent: #b4640f;        /* brass, darkened for light bg */
+    --accent-ink: #fff5e8;
+    --good: #4d7c3a;
+    --warn: #9a6a12;
+    --bad: #a5402c;
+    --shadow: 0 1px 0 rgba(0,0,0,.04), 0 8px 24px -16px rgba(40,30,10,.25);
+    --r: 10px;
+  }
+  /* ---- tokens : dark via OS default (un-stamped) ------------------- */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #16130f;
+      --panel: #201b14;
+      --panel-2: #2a2318;
+      --line: #392f22;
+      --line-strong: #4b3f2d;
+      --text: #f0e9db;
+      --dim: #9c9082;
+      --accent: #e39a3c;
+      --accent-ink: #1c1408;
+      --good: #7fb069;
+      --warn: #e3b23c;
+      --bad: #cd6551;
+      --shadow: 0 1px 0 rgba(0,0,0,.3), 0 12px 30px -18px rgba(0,0,0,.7);
+    }
+  }
+  /* ---- tokens : dark via explicit toggle -------------------------- */
+  :root[data-theme="dark"] {
+    --ground: #16130f;
+    --panel: #201b14;
+    --panel-2: #2a2318;
+    --line: #392f22;
+    --line-strong: #4b3f2d;
+    --text: #f0e9db;
+    --dim: #9c9082;
+    --accent: #e39a3c;
+    --accent-ink: #1c1408;
+    --good: #7fb069;
+    --warn: #e3b23c;
+    --bad: #cd6551;
+    --shadow: 0 1px 0 rgba(0,0,0,.3), 0 12px 30px -18px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; }
+  body {
+    background: var(--ground);
+    color: var(--text);
+    font: 400 15px/1.55 "IBM Plex Sans", system-ui, sans-serif;
+    padding: env(safe-area-inset-top) 0 calc(72px + env(safe-area-inset-bottom));
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  ::selection { background: var(--accent); color: var(--accent-ink); }
+
+  .wrap { max-width: 640px; margin: 0 auto; padding: 14px 16px 8px; }
+
+  /* header + status strip */
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .mark { font: 700 21px/1 "Oswald", sans-serif; letter-spacing: .16em; text-transform: uppercase; }
+  .mark b { color: var(--accent); font-weight: 700; }
+  .ver { font: 500 11px/1 "IBM Plex Mono", monospace; color: var(--dim); letter-spacing: .05em; }
+
+  .strip {
+    display: flex; align-items: center; gap: 8px; margin: 10px 0 14px;
+    padding: 8px 11px; border: 1px solid var(--line); border-left: 3px solid var(--line-strong);
+    border-radius: 6px; background: var(--panel); font-size: 12.5px;
+  }
+  .strip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
+  .strip.native { border-left-color: var(--good); }
+  .strip.native .dot { background: var(--good); }
+  .strip.replay { border-left-color: var(--warn); }
+  .strip.replay .dot { background: var(--warn); }
+  .strip.bad { border-left-color: var(--bad); }
+  .strip.bad .dot { background: var(--bad); }
+  .strip .sync { margin-left: auto; color: var(--dim); font-family: "IBM Plex Mono", monospace; font-size: 11px; }
+
+  h1, h2, h3 { margin: 0; font-family: "Oswald", sans-serif; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; text-wrap: balance; }
+  h2 { font-size: 15px; }
+  h3 { font-size: 13px; color: var(--dim); }
+  .lede { color: var(--dim); font-size: 13px; margin: 4px 0 0; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; margin-bottom: 12px; box-shadow: var(--shadow); }
+  .card > .head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+  .count { font: 500 11px/1 "IBM Plex Mono", monospace; color: var(--dim); letter-spacing: .04em; }
+
+  /* controls */
+  input, select, button { font: inherit; color: var(--text); }
+  .field { position: relative; }
+  input, select {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--line-strong);
+    border-radius: 7px; padding: 11px 12px; appearance: none;
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+  select { background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%), linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+    background-position: right 14px center, right 9px center; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; padding-right: 32px; }
+  label.chk { display: inline-flex; align-items: center; gap: 7px; color: var(--dim); font-size: 13px; }
+  label.chk input { width: auto; }
+
+  button {
+    background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 7px;
+    padding: 11px 16px; font-weight: 600; font-family: "Oswald", sans-serif; letter-spacing: .06em;
+    text-transform: uppercase; cursor: pointer;
+  }
+  button:active { transform: translateY(1px); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line-strong); }
+  button.mini { padding: 5px 9px; font-size: 11px; }
+  button.link { background: none; border: 0; color: var(--bad); padding: 6px 0; font-family: inherit; letter-spacing: 0; text-transform: none; font-weight: 500; }
+
+  .stack { display: grid; gap: 9px; }
+  .inline { display: flex; gap: 9px; align-items: center; }
+  .inline > * { min-width: 0; }
+  .inline > .grow { flex: 1; }
+  .trio { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
+  .trio label { display: grid; gap: 4px; color: var(--dim); font-size: 12px; }
+  input[type="checkbox"] { appearance: auto; -webkit-appearance: checkbox; width: 17px; height: 17px; accent-color: var(--accent); flex: none; padding: 0; }
+
+  /* ledger rows */
+  .ledger { display: grid; }
+  .ledger .row {
+    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px;
+    padding: 9px 0; border-bottom: 1px solid var(--line);
+  }
+  .ledger .row:last-child { border-bottom: 0; }
+  .name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .name .n { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .id { font: 400 10.5px/1.4 "IBM Plex Mono", monospace; color: var(--dim); background: var(--panel-2);
+    border: 1px solid var(--line); padding: 1px 5px; border-radius: 4px; flex: none; }
+  .qty { font-variant-numeric: tabular-nums; font-weight: 600; font-family: "IBM Plex Mono", monospace; }
+
+  .chip { font: 500 11px/1.3 "IBM Plex Mono", monospace; padding: 3px 8px; border-radius: 999px;
+    border: 1px solid var(--line-strong); color: var(--dim); white-space: nowrap; }
+  .chip.run { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, var(--line-strong)); }
+  .chip.idle { color: var(--dim); }
+  .chip.src { text-transform: none; }
+
+  details > summary { cursor: pointer; color: var(--dim); font-size: 12.5px; padding: 7px 0; list-style: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before { content: "+ "; color: var(--accent); font-family: "IBM Plex Mono", monospace; }
+  details[open] > summary::before { content: "– "; }
+
+  .empty { text-align: center; color: var(--dim); font-size: 13px; padding: 22px 8px; }
+  .err { color: var(--bad); font-size: 12.5px; }
+
+  /* tab bar */
+  nav.tabs {
+    position: fixed; inset: auto 0 0 0; z-index: 20; display: flex;
+    background: var(--panel); border-top: 1px solid var(--line-strong);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  nav.tabs button {
+    flex: 1; background: none; color: var(--dim); border: 0; border-radius: 0;
+    padding: 11px 4px 13px; font: 600 10px/1 "Oswald", sans-serif; letter-spacing: .1em; text-transform: uppercase;
+    display: grid; gap: 5px; justify-items: center;
+  }
+  nav.tabs button svg { width: 19px; height: 19px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+  nav.tabs button[aria-selected="true"] { color: var(--accent); box-shadow: inset 0 2px 0 var(--accent); }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 80px; transform: translate(-50%, 8px);
+    background: var(--text); color: var(--ground); font-size: 13.5px; font-weight: 500;
+    padding: 10px 16px; border-radius: 7px; z-index: 30; max-width: 88vw;
+    opacity: 0; transition: opacity .18s, transform .18s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.bad { background: var(--bad); color: #fff; }
+
+  .spin { display: inline-block; width: 13px; height: 13px; border: 2px solid var(--line-strong);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { *, ::before, ::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+
+  [hidden] { display: none !important; }
+</style>
+<div class="wrap">
+  <header>
+    <span class="mark">Pal&nbsp;<b>Command</b></span>
+    <span class="ver" id="ver">—</span>
+  </header>
+  <div class="strip" id="strip" hidden>
+    <span class="dot"></span>
+    <span id="stripText">Conectando…</span>
+    <span class="sync" id="stripSync"></span>
+  </div>
+
+  <!-- SETUP -->
+  <section id="v-setup" hidden>
+    <div class="card">
+      <div class="head"><h2>Conectar</h2></div>
+      <p class="lede">Pega la dirección de tu Worker y el token de acceso. Se guardan solo en este teléfono.</p>
+      <div class="stack" style="margin-top:12px">
+        <div class="field"><input id="cfgUrl" placeholder="https://pal-command.tu-cuenta.workers.dev" autocapitalize="off" autocorrect="off" spellcheck="false" /></div>
+        <div class="field"><input id="cfgToken" type="password" placeholder="Token de acceso" autocapitalize="off" autocorrect="off" spellcheck="false" /></div>
+        <button id="cfgSave">Conectar</button>
+        <button class="ghost" id="cfgDemo">Ver demostración</button>
+        <p class="err" id="cfgErr" hidden></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- STOCK -->
+  <section id="v-stock" hidden>
+    <div class="card">
+      <div class="head"><h2>Almacén del servidor</h2><span class="count" id="stockCount"></span></div>
+      <div class="field" style="margin-bottom:6px"><input id="stockSearch" placeholder="Buscar…" autocapitalize="off" /></div>
+      <div class="ledger" id="stockList"></div>
+    </div>
+    <div id="stockBases"></div>
+  </section>
+
+  <!-- ORDER -->
+  <section id="v-order" hidden>
+    <div class="card">
+      <div class="head"><h2>Nueva orden</h2></div>
+      <div class="stack">
+        <div class="field"><select id="ordRecipe"></select></div>
+        <div class="inline">
+          <div class="field grow"><input id="ordCount" type="number" min="1" inputmode="numeric" value="50" /></div>
+          <button id="ordGo">Pedir</button>
+        </div>
+        <label class="chk"><input type="checkbox" id="ordTransport" checked /> Un Pal lo lleva al cofre</label>
+        <p class="lede" id="ordHint"></p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="head"><h3>Estado del taller</h3><span class="count" id="floorCount"></span></div>
+      <div class="ledger" id="floorList"></div>
+    </div>
+  </section>
+
+  <!-- RULES -->
+  <section id="v-rules" hidden>
+    <div class="card">
+      <div class="head"><h2>Reglas fijas</h2></div>
+      <p class="lede">Cuando el total baja del mínimo, se fabrica hasta el objetivo — en tandas.</p>
+      <div class="stack" id="rulesList" style="margin-top:12px"></div>
+      <div class="inline" style="margin-top:12px">
+        <button class="ghost grow" id="ruleAdd">Añadir regla</button>
+        <button id="rulesSave" hidden>Guardar</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- STATUS -->
+  <section id="v-status" hidden>
+    <div class="card">
+      <div class="head"><h2>Turno</h2></div>
+      <div class="ledger" id="statusBody"></div>
+    </div>
+    <div class="card">
+      <div class="head"><h3>En cola</h3><span class="count" id="queueCount"></span></div>
+      <div class="ledger" id="queueList"></div>
+    </div>
+    <div class="card">
+      <div class="head"><h3>Registro</h3></div>
+      <div class="ledger" id="recentList"></div>
+    </div>
+    <button class="ghost" id="forget" style="width:100%">Desconectar este teléfono</button>
+  </section>
+</div>
+
+<nav class="tabs" id="tabs" role="tablist" hidden>
+  <button role="tab" data-tab="stock" aria-selected="true"><svg viewBox="0 0 24 24"><path d="M3 8l9-5 9 5v8l-9 5-9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg>Almacén</button>
+  <button role="tab" data-tab="order" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M14 4l6 6-9 9-6 1 1-6z"/><path d="M13 5l6 6"/></svg>Orden</button>
+  <button role="tab" data-tab="rules" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 13-6l3 3M20 12a8 8 0 0 1-13 6l-3-3"/><path d="M20 3v6h-6M4 21v-6h6"/></svg>Reglas</button>
+  <button role="tab" data-tab="status" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M4 20a8 8 0 0 1 8-8M4 20a12 12 0 0 1 12-12"/><circle cx="5" cy="19" r="1.4" fill="currentColor" stroke="none"/><path d="M15 4h5v5"/></svg>Turno</button>
+</nav>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+/* Pal Command PWA */
+"use strict";
+
+const LS = { url: "pc.url", token: "pc.token", tab: "pc.tab" };
+const cfg = {
+  url: localStorage.getItem(LS.url) || "",
+  token: localStorage.getItem(LS.token) || "",
+  demo: false,
+};
+
+let SNAP = null;
+let rulesDraft = null;
+let timer = null;
+
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => [...document.querySelectorAll(s)];
+const el = (t, p = {}, kids = []) => {
+  const n = document.createElement(t);
+  for (const [k, v] of Object.entries(p)) {
+    if (k === "class") n.className = v;
+    else if (k === "html") n.innerHTML = v;
+    else if (k.startsWith("on") && typeof v === "function") n.addEventListener(k.slice(2), v);
+    else if (v != null) n.setAttribute(k, v);
+  }
+  for (const c of [].concat(kids)) if (c != null) n.append(c.nodeType ? c : document.createTextNode(String(c)));
+  return n;
+};
+
+const NAMES = {
+  Pal_crystal_S: "Fragmento de Paldium", Stone: "Piedra", Wood: "Madera", Ingot: "Lingote",
+  CopperIngot: "Lingote de cobre", CharcoalFragment: "Carbón", Charcoal: "Carbón", Nail: "Clavo",
+  Cloth: "Tela", Gunpowder: "Pólvora", RefinedIngot: "Lingote refinado", PalMetalIngot: "Lingote de metal Pal",
+  CrudeOil: "Petróleo crudo", HighQualityPalOil: "Aceite Pal de alta calidad", Flour: "Harina", Bread: "Pan",
+  CarbonFiber: "Fibra de carbono", CementConcrete: "Cemento", Cement: "Cemento", PolymerMaterial: "Polímero",
+  ElectronicCircuit: "Circuito", Sulfur: "Azufre", Quartz: "Cuarzo", Coal: "Carbón mineral", PalSphere: "Pal Sphere",
+};
+const nice = (id) => NAMES[id] || String(id || "").replace(/^Pal_/, "").replace(/_/g, " ");
+const num = (n) => String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+const ago = (iso) => {
+  if (!iso) return "";
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return "hace " + Math.round(s) + "s";
+  if (s < 3600) return "hace " + Math.round(s / 60) + "m";
+  return "hace " + Math.round(s / 3600) + "h";
+};
+
+// ------------------------------------------------------------------ api
+
+async function api(path, opts = {}) {
+  if (cfg.demo) return demoApi(path, opts);
+  const r = await fetch(cfg.url.replace(/\/$/, "") + path, {
+    ...opts,
+    headers: { "content-type": "application/json", authorization: "Bearer " + cfg.token, ...(opts.headers || {}) },
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || body.detail || "HTTP " + r.status);
+  return body;
+}
+
+// ------------------------------------------------------------------ chrome
+
+const VIEWS = ["stock", "order", "rules", "status"];
+
+function show(tab) {
+  if (!VIEWS.includes(tab)) tab = "stock";
+  localStorage.setItem(LS.tab, tab);
+  VIEWS.forEach((t) => ($("#v-" + t).hidden = t !== tab));
+  $$("#tabs button").forEach((b) => b.setAttribute("aria-selected", b.dataset.tab === tab));
+  if (tab === "rules") renderRules();
+}
+
+function strip() {
+  const s = SNAP?.state;
+  const box = $("#strip");
+  box.hidden = false;
+  const b = s?.backend || s?.engine?.backend;
+  const dot = box.querySelector(".dot");
+  box.className = "strip " + (b === "native" ? "native" : b === "replay" ? "replay" : "");
+  let t = !b ? "Sin datos del servidor"
+    : b === "native" ? "Autónomo · las órdenes se colocan solas"
+    : "Al craftear · se colocan cuando alguien fabrica";
+  if (s?.lastError) { box.classList.add("bad"); t = "Aviso: " + s.lastError; }
+  $("#stripText").textContent = t;
+  $("#stripSync").textContent = s?.lastScan ? ago(s.lastScan) : SNAP ? ago(SNAP.fetchedAt) : "";
+  const depth = s?.queueDepth ?? 0;
+  $("#ver").textContent = depth > 0 ? depth + " en cola" : "";
+}
+
+function toast(msg, bad = false) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "toast show" + (bad ? " bad" : "");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => (t.className = "toast"), 2800);
+}
+
+// ------------------------------------------------------------------ render
+
+function renderStock() {
+  const inv = SNAP?.inventory;
+  const list = $("#stockList");
+  const bases = $("#stockBases");
+  list.innerHTML = "";
+  bases.innerHTML = "";
+  $("#stockCount").textContent = inv ? `${inv.diagnostics?.baseCount ?? 0} bases · ${inv.diagnostics?.containerCount ?? 0} cofres` : "";
+  if (!inv) { list.append(el("div", { class: "empty" }, "El mod aún no publicó inventario.")); return; }
+
+  const q = ($("#stockSearch").value || "").toLowerCase().trim();
+  const rows = Object.entries(inv.totals || {})
+    .filter(([id]) => !q || id.toLowerCase().includes(q) || nice(id).toLowerCase().includes(q))
+    .sort((a, b) => b[1] - a[1]);
+  if (!rows.length) list.append(el("div", { class: "empty" }, q ? "Nada coincide." : "Almacén vacío."));
+  for (const [id, n] of rows) {
+    list.append(el("div", { class: "row" }, [
+      el("span", { class: "name" }, [el("span", { class: "n" }, nice(id)), el("span", { class: "id" }, id)]),
+      el("span", { class: "qty" }, num(n)),
+    ]));
+  }
+
+  for (const base of inv.bases || []) {
+    const card = el("div", { class: "card" });
+    card.append(el("div", { class: "head" }, [el("h3", {}, base.name)]));
+    for (const c of base.containers || []) {
+      const items = Object.entries(c.items || {}).sort((a, b) => b[1] - a[1]);
+      const d = el("details");
+      d.append(el("summary", {}, `${c.name} · ${items.length}`));
+      const led = el("div", { class: "ledger" });
+      for (const [id, n] of items) led.append(el("div", { class: "row" }, [
+        el("span", { class: "name" }, [el("span", { class: "n" }, nice(id))]),
+        el("span", { class: "qty" }, num(n)),
+      ]));
+      d.append(led);
+      card.append(d);
+    }
+    bases.append(card);
+  }
+  if (inv.guildChest?.available) {
+    const items = Object.entries(inv.guildChest.items || {}).sort((a, b) => b[1] - a[1]);
+    const card = el("div", { class: "card" });
+    card.append(el("div", { class: "head" }, [el("h3", {}, "Cofre de gremio")]));
+    const led = el("div", { class: "ledger" });
+    for (const [id, n] of items) led.append(el("div", { class: "row" }, [
+      el("span", { class: "name" }, [el("span", { class: "n" }, nice(id))]),
+      el("span", { class: "qty" }, num(n)),
+    ]));
+    card.append(led);
+    bases.append(card);
+  }
+}
+
+function renderOrder() {
+  const st = SNAP?.stations;
+  const sel = $("#ordRecipe");
+  const floor = $("#floorList");
+  floor.innerHTML = "";
+  $("#floorCount").textContent = st ? String(st.stations?.length ?? 0) : "";
+
+  const recipes = new Map();
+  for (const s of st?.stations || []) {
+    for (const r of s.recipes || []) {
+      if (!recipes.has(r)) recipes.set(r, new Set());
+      recipes.get(r).add(s.baseName);
+    }
+    floor.append(el("div", { class: "row" }, [
+      el("span", { class: "name" }, [el("span", { class: "n" }, s.baseName)]),
+      el("span", { class: "chip " + (s.state?.workable ? "run" : "idle") },
+        s.state?.workable ? `${nice(s.state.recipe)} ·${s.state.remaining}` : "libre"),
+    ]));
+  }
+  if (!recipes.size) floor.append(el("div", { class: "empty" }, "Sin estaciones. ¿El mod está activo y hay un mundo cargado?"));
+
+  const cur = sel.value;
+  sel.innerHTML = "";
+  [...recipes.keys()].sort((a, b) => nice(a).localeCompare(nice(b))).forEach((id) => {
+    sel.append(el("option", { value: id }, `${nice(id)}  —  ${[...recipes.get(id)].join(", ")}`));
+  });
+  if (cur && recipes.has(cur)) sel.value = cur;
+  $("#ordHint").textContent = recipes.size ? "El pedido entra a la cola y se coloca en una estación libre." : "";
+}
+
+function ruleRow(rule, i) {
+  const dirty = () => ($("#rulesSave").hidden = false);
+  const set = (k, v) => { rule[k] = v; dirty(); };
+  const card = el("div", { class: "card", style: "margin:0;padding:12px" });
+  card.append(el("div", { class: "inline" }, [
+    el("input", { class: "grow", value: rule.item || "", placeholder: "Item (p.ej. Pal_crystal_S)", oninput: (e) => set("item", e.target.value.trim()) }),
+    el("label", { class: "chk" }, [el("input", { type: "checkbox", checked: rule.enabled !== false ? "" : null, onchange: (e) => set("enabled", e.target.checked) }), "on"]),
+  ]));
+  const g = el("div", { class: "trio", style: "margin-top:9px" });
+  for (const [k, lbl] of [["min", "mínimo"], ["target", "objetivo"], ["batch", "tanda"]]) {
+    g.append(el("label", {}, [
+      lbl,
+      el("input", { type: "number", inputmode: "numeric", value: rule[k] ?? "", oninput: (e) => set(k, e.target.value === "" ? undefined : Number(e.target.value)) }),
+    ]));
+  }
+  card.append(g);
+  card.append(el("button", { class: "link", onclick: () => { rulesDraft.splice(i, 1); renderRules(); dirty(); } }, "Borrar regla"));
+  return card;
+}
+
+function renderRules() {
+  if (!rulesDraft) rulesDraft = JSON.parse(JSON.stringify(SNAP?.rules?.rules || []));
+  const wrap = $("#rulesList");
+  wrap.innerHTML = "";
+  if (!rulesDraft.length) wrap.append(el("div", { class: "empty" }, "Sin reglas todavía."));
+  rulesDraft.forEach((r, i) => wrap.append(ruleRow(r, i)));
+}
+
+function renderStatus() {
+  const s = SNAP?.state;
+  const body = $("#statusBody");
+  body.innerHTML = "";
+  const line = (k, v, cls) => body.append(el("div", { class: "row" }, [
+    el("span", { class: "name" }, [el("span", { class: "n" }, k)]),
+    el("span", { class: cls || "qty" }, String(v)),
+  ]));
+  if (!s) body.append(el("div", { class: "empty" }, "Sin estado."));
+  else {
+    line("Modo", s.backend === "native" ? "autónomo" : "al craftear");
+    line("Hook", s.hookInstalled ? "instalado" : "no");
+    line("En cola", s.queueDepth ?? 0);
+    line("Colocadas", s.engine?.placed ?? 0);
+    line("Fallidas", s.engine?.failed ?? 0);
+    line("Último escaneo", s.lastScan ? ago(s.lastScan) : "—");
+    if (s.lastError) line("Aviso", s.lastError, "err");
+  }
+  const q = $("#queueList");
+  q.innerHTML = "";
+  $("#queueCount").textContent = String((s?.queue || []).length);
+  for (const o of s?.queue || []) q.append(el("div", { class: "row" }, [
+    el("span", { class: "name" }, [el("span", { class: "n" }, `${nice(o.recipe)} ×${o.count}`), o.source ? el("span", { class: "chip src" }, o.source) : null]),
+    el("button", { class: "mini ghost", onclick: () => removeOrder(o.id) }, "Quitar"),
+  ]));
+  if (!(s?.queue || []).length) q.append(el("div", { class: "empty" }, "Nada en cola."));
+  const r = $("#recentList");
+  r.innerHTML = "";
+  const recent = (s?.recent || []).slice().reverse();
+  for (const x of recent) r.append(el("div", { class: "row" }, [
+    el("span", { class: "name" }, [el("span", { class: "n" }, `${nice(x.recipe)} ×${x.count}`)]),
+    el("span", { class: "chip " + (x.result === "placed" ? "run" : "idle"), style: x.result !== "placed" ? "color:var(--bad)" : "" }, x.result),
+  ]));
+  if (!recent.length) r.append(el("div", { class: "empty" }, "—"));
+}
+
+function renderAll() {
+  strip();
+  renderStock();
+  renderOrder();
+  renderStatus();
+  if (!$("#v-rules").hidden) renderRules();
+}
+
+// ------------------------------------------------------------------ actions
+
+async function refresh(opts = {}) {
+  try {
+    SNAP = await api("/api/snapshot" + (opts.fresh ? "?fresh=1" : ""));
+    if ($("#rulesSave").hidden) rulesDraft = null; // no unsaved edits -> adopt server rules
+    renderAll();
+  } catch (e) {
+    if (/unauthorized/i.test(e.message)) return gotoSetup();
+    toast(e.message, true);
+  }
+}
+
+async function order() {
+  const recipe = $("#ordRecipe").value;
+  const count = Math.max(1, Math.floor(Number($("#ordCount").value) || 0));
+  if (!recipe || !count) return;
+  $("#ordGo").disabled = true;
+  try {
+    await api("/api/orders", { method: "POST", body: JSON.stringify({ recipe, count, transport: $("#ordTransport").checked }) });
+    toast(`En cola: ${nice(recipe)} ×${count}`);
+    await refresh({ fresh: true });
+  } catch (e) { toast(e.message, true); }
+  $("#ordGo").disabled = false;
+}
+
+async function removeOrder(id) {
+  try { await api("/api/orders/" + encodeURIComponent(id), { method: "DELETE" }); await refresh({ fresh: true }); }
+  catch (e) { toast(e.message, true); }
+}
+
+async function saveRules() {
+  try {
+    const res = await api("/api/rules", { method: "PUT", body: JSON.stringify({ rules: rulesDraft }) });
+    rulesDraft = res.rules || rulesDraft;
+    $("#rulesSave").hidden = true;
+    toast("Reglas guardadas");
+    await refresh({ fresh: true });
+  } catch (e) { toast(e.message, true); }
+}
+
+// ------------------------------------------------------------------ boot
+
+function gotoSetup() {
+  stop();
+  $("#strip").hidden = true;
+  $("#tabs").hidden = true;
+  $("#v-setup").hidden = false;
+  VIEWS.forEach((t) => ($("#v-" + t).hidden = true));
+}
+
+function gotoApp() {
+  $("#v-setup").hidden = true;
+  $("#tabs").hidden = false;
+  show(localStorage.getItem(LS.tab) || "stock");
+  refresh();
+  start();
+}
+
+function start() { stop(); timer = setInterval(() => refresh(), 20000); }
+function stop() { if (timer) clearInterval(timer); timer = null; }
+
+$("#cfgSave").addEventListener("click", async () => {
+  const url = $("#cfgUrl").value.trim();
+  const token = $("#cfgToken").value.trim();
+  $("#cfgErr").hidden = true;
+  if (!url || !token) { $("#cfgErr").textContent = "Faltan datos."; $("#cfgErr").hidden = false; return; }
+  cfg.url = url; cfg.token = token; cfg.demo = false;
+  try {
+    await api("/api/snapshot");
+    localStorage.setItem(LS.url, url);
+    localStorage.setItem(LS.token, token);
+    gotoApp();
+  } catch (e) {
+    $("#cfgErr").textContent = "No conecta: " + e.message;
+    $("#cfgErr").hidden = false;
+  }
+});
+$("#cfgDemo").addEventListener("click", () => { cfg.demo = true; gotoApp(); toast("Demostración con datos de ejemplo"); });
+$("#forget").addEventListener("click", () => { localStorage.clear(); location.reload(); });
+$("#ordGo").addEventListener("click", order);
+$("#rulesSave").addEventListener("click", saveRules);
+$("#ruleAdd").addEventListener("click", () => { (rulesDraft ||= []).push({ item: "", min: 0, target: 0, enabled: true }); renderRules(); $("#rulesSave").hidden = false; });
+$("#stockSearch").addEventListener("input", renderStock);
+$$("#tabs button").forEach((b) => b.addEventListener("click", () => show(b.dataset.tab)));
+document.addEventListener("visibilitychange", () => { if (!document.hidden && $("#v-setup").hidden) refresh(); });
+
+
+if (cfg.url && cfg.token) gotoApp();
+else gotoSetup();
+
+// ------------------------------------------------------------------ demo
+
+function demoApi(path, opts) {
+  if (path.startsWith("/api/snapshot")) return Promise.resolve(structuredClone(DEMO));
+  if (path.startsWith("/api/orders") && opts.method === "POST") {
+    const b = JSON.parse(opts.body);
+    DEMO.state.queue.push({ id: "d" + Date.now(), recipe: b.recipe, count: b.count, source: "orden" });
+    DEMO.state.queueDepth = DEMO.state.queue.length;
+    return Promise.resolve({ ok: true });
+  }
+  if (path.startsWith("/api/orders/") && opts.method === "DELETE") {
+    const id = decodeURIComponent(path.split("/").pop());
+    DEMO.state.queue = DEMO.state.queue.filter((o) => o.id !== id);
+    DEMO.state.queueDepth = DEMO.state.queue.length;
+    return Promise.resolve({ ok: true });
+  }
+  if (path.startsWith("/api/rules")) {
+    DEMO.rules.rules = JSON.parse(opts.body).rules;
+    return Promise.resolve({ ok: true, rules: DEMO.rules.rules });
+  }
+  return Promise.resolve({});
+}
+
+const DEMO = {
+  fetchedAt: new Date().toISOString(),
+  inventory: {
+    diagnostics: { baseCount: 2, containerCount: 5, complete: true },
+    totals: { Stone: 5720, Wood: 1840, Nail: 210, Sulfur: 178, Pal_crystal_S: 128, Ingot: 96, CrudeOil: 79, CharcoalFragment: 40, Cloth: 12 },
+    bases: [
+      { name: "Base principal", containers: [
+        { name: "Cofre 1", items: { Stone: 5200, Wood: 1500 } },
+        { name: "Cofre 2", items: { Ingot: 96, Nail: 210, Cloth: 12 } },
+      ] },
+      { name: "Base minera", containers: [
+        { name: "Cofre 1", items: { Stone: 520, Sulfur: 178, CrudeOil: 79, CharcoalFragment: 40 } },
+      ] },
+    ],
+    guildChest: { available: true, items: { Pal_crystal_S: 128 } },
+  },
+  stations: {
+    stations: [
+      { key: "b1|crush", baseName: "Base principal", recipes: ["Pal_crystal_S", "CharcoalFragment"], state: { recipe: "None", remaining: 0, workable: false } },
+      { key: "b1|furn", baseName: "Base principal", recipes: ["Ingot", "CopperIngot", "RefinedIngot"], state: { recipe: "Ingot", remaining: 32, workable: true } },
+      { key: "b2|crush", baseName: "Base minera", recipes: ["Pal_crystal_S"], state: { recipe: "None", remaining: 0, workable: false } },
+    ],
+  },
+  state: {
+    backend: "replay", hookInstalled: true, queueDepth: 1,
+    lastScan: new Date(Date.now() - 42000).toISOString(),
+    queue: [{ id: "d0", recipe: "Pal_crystal_S", count: 200, source: "regla:paldium" }],
+    recent: [
+      { recipe: "Nail", count: 100, result: "placed" },
+      { recipe: "Ingot", count: 50, result: "placed" },
+      { recipe: "Cloth", count: 20, result: "dropped" },
+    ],
+    engine: { backend: "replay", placed: 12, failed: 1 },
+  },
+  rules: { rules: [{ id: "paldium", item: "Pal_crystal_S", recipe: "Pal_crystal_S", min: 300, target: 1000, batch: 200, enabled: true }] },
+  orders: [],
+};
+
+</script>
