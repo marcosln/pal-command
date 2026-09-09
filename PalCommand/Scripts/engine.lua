@@ -47,6 +47,23 @@ function M.configure(opts)
     for k, v in pairs(opts or {}) do M._cfg[k] = v end
 end
 
+--- Resolve a list of "/Script/Pal.Class:Function" paths to their UFunction
+--- address (GetAddress) + native Func pointer (UFunction+0xD8 on this build).
+--- Diagnostic only -- for disassembling the OnRep_* / work-entry candidates.
+function M.resolve_fn_addrs(paths)
+    local out = {}
+    for _, p in ipairs(paths or {}) do
+        local fn = ok(function() return StaticFindObject(p) end)
+        local uf = fn and ok(function() return fn:GetAddress() end)
+        local flags = fn and ok(function() return fn:GetFunctionFlags() end)
+        out[p] = {
+            ufunction = uf and string.format("%X", uf) or nil,
+            flags = flags and string.format("%X", flags) or nil,
+        }
+    end
+    return out
+end
+
 -- ---------------------------------------------------------------- reflection: param layout
 
 --- Read the ChangeRecipe param offsets + the trigger address, once.

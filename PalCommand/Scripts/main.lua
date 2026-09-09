@@ -368,6 +368,17 @@ local function boot()
                 else
                     util.log("convert-api dump failed: " .. tostring(api))
                 end
+                -- OnRep_* + work-entry candidates -> UFunction addrs for disasm
+                local P = "/Script/Pal.PalMapObjectConvertItemModel:"
+                local fns = engine.resolve_fn_addrs and engine.resolve_fn_addrs({
+                    P .. "OnRep_CurrentRecipeId", P .. "OnRep_RequestedProductNum",
+                    P .. "OnRep_RemainProductNum", P .. "OnRep_IsWorkable",
+                    "/Script/Pal.PalMapObjectConcreteModelBase:OnRep_ModuleArray",
+                    P .. "OnStartWorkAnyone_ServerInternal", P .. "OnEndWorkAnyone_ServerInternal",
+                    P .. "OnFinishWorkInServer",
+                }) or {}
+                util.write_file(ROOT .. "\\data\\fn-addrs.json", json.encode(fns))
+                util.log("fn-addrs dumped")
             end
             if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
         end)
