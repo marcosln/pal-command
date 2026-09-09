@@ -18,9 +18,10 @@ set standing rules. Crafting stays legit (real machine, real cost, a Pal works).
 
 Native backend, works whenever ANY player is online (AFK, never crafts).
 
-- [x] 1.1 Multi-machine place + whole-queue drain <!-- done 2026-09-09: commit 761d03c; M.place iterates all stations for a recipe, native_tick chains next order -->
-- [ ] 1.2 Per-machine identity (persistent mapId) + world position + machine type
-      <!-- in progress: station-probe one-shot deployed to read real reflection names; wire from station-probe.json -->
+- [x] 1.1 Multi-machine place + whole-queue drain <!-- done 2026-09-09: commit 761d03c; M.place iterates all stations for a recipe (discovery.stations_for), native_tick chains the next order on a verified placement. Deployed. Not yet stress-tested live (that's 1.3/1.6). -->
+- [~] 1.2 Per-machine identity (persistent mapId) + world position + machine type
+      <!-- code done (commit d1b9434): discovery.station_identity uses st.InstanceId (FGuid, persistent) for mapId, st:GetActor():K2_GetActorLocation() for pos, actor class name for machineType. NEEDS: deploy discovery.lua+main.lua (CDN was slow ~2026-09-09 16:00), restart, then check data/stations.json rows have a real 32-hex mapId + {x,y,z} pos + machineType. If pos is missing, GetActor() worked in the probe so retry K2_GetActorLocation / GetActorLocation on the actor. Then tick this and go to 1.3. -->
+      Probe result (for reference): `st.InstanceId` = FGuid {A,B,C,D}; `st:GetActor()` → AActor; `GetBaseCampIdBelongTo()` → base FGuid. `CurrentRecipeRequestPlayerUId` (FGuid) is the stored setter — may matter for STAGE 1.4.
 - [ ] 1.3 **Live test** (needs the user connected, AFK is fine): write `data/orders.json` on the server with ~3 orders for different recipes (e.g. `Pal_crystal_S`, `Charcoal`, `CopperIngot`) — optionally each with a `target` (a machine `mapId` or `key#index` from `data/stations.json`). Watch `data/palcommand.log` for `native: <recipe> xN VERIFIED` for each, one after another (~2-4s apart). Then confirm in-game: each machine shows the recipe, a Pal walks over and works it, product goes to a chest. Record the full before/after (station state + a material count).
       Order file shape: `[{"recipe":"Pal_crystal_S","count":3,"transport":true},{"recipe":"Charcoal","count":5},...]` (mod ingests it each scan / on the native chain).
 - [ ] 1.4 Edge cases: target machine busy → fall to next; recipe nobody can make; not enough materials (report, don't spin); cancel an in-flight order; order for a machine that no longer exists after restart
