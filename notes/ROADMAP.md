@@ -74,14 +74,26 @@ Native backend, works whenever ANY player is online (AFK, never crafts).
 
 ## STAGE 4 — Cloud Worker + PWA wired to live data
 
-- [ ] 4.1 User gives DatHost API token → `wrangler secret put` (APP_TOKEN, DATHOST_*)
-- [ ] 4.2 `wrangler kv namespace create` → fill `cloud/wrangler.toml`
-- [ ] 4.3 `wrangler deploy`; test /api/snapshot /orders /rules /health
-- [ ] 4.4 Mod ↔ Worker sync (poll orders/rules, post inventory/state) via config WorkerBaseUrl+ServerToken
+**Architecture note (2026-09-09):** for a published app the Worker must be
+**multi-tenant** — ONE Worker (we host it), each user pastes their own credentials
+in the app; never "deploy your own Worker". Two connection paths, offered in the app:
+  - **Host API** (DatHost etc.): user generates an API key in their host panel,
+    pastes it in the app. Worker talks to the host's file API. No FTP. Works today
+    for DatHost (`api/0.1/game-servers/{id}/files`, key auth).
+  - **Mod push** (any host, incl. self-host): user sets `WorkerBaseUrl` + a
+    `ServerToken` in `config.ini` once. The mod does outbound HTTPS — POSTs
+    inventory/state, polls orders/rules. App only ever talks to the Worker, keyed
+    by that token. No host API, no FTP, host-agnostic. NEEDS: outbound HTTP from
+    UE4SS-Lua — not built in; likely via the C++ bridge or `FHttpModule` reflection.
+
+- [ ] 4.1 Multi-tenant Worker: per-user record (host+id+key OR serverToken) in KV; `APP_TOKEN` becomes a per-user thing
+- [ ] 4.2 `wrangler kv namespace create` → fill `cloud/wrangler.toml`; `wrangler deploy`
+- [ ] 4.3 Test /api/snapshot /orders /rules /health (both connection paths)
+- [ ] 4.4 Mod → Worker push: outbound HTTPS from the mod (bridge or FHttpModule); config WorkerBaseUrl+ServerToken
 - [ ] 4.5 PWA points at the live Worker; inventory view real
 - [ ] 4.6 PWA order flow: create → shows "placed" from state.json
 - [ ] 4.7 PWA rules editor
-- [ ] 4.8 Auth: per-server token, entered once
+- [ ] 4.8 Onboarding: "connect your server" — pick path, paste key/token, verify, done. One time.
 
 ## STAGE 5 — Polish + publish
 
@@ -98,6 +110,15 @@ guideline 4.2 ("not just a web view"). Name already avoids the Palworld trademar
 - [ ] 5.2 Mod packaging + install README for strangers
 - [ ] 5.3 Publish mod (Nexus)
 - [ ] 5.4 Capacitor wrap → TestFlight → App Store submission (needs the Apple Developer account)
+- [ ] 5.5 **LICENSE + credits before publishing.** Repo has no LICENSE (pick MIT).
+      `json.lua` / `discovery.lua` say "derived from / mirrors PalworldMobileBridge"
+      — establish what that project is + its license (comments were written by
+      Codex, not verified); either add proper attribution or confirm it's our own
+      independent implementation and soften the comments. `json.lua` structure is
+      NOT rxi/json.lua (different design). PBA ("Palworld Base Automation", Nexus
+      mod 3691) is prior art for the *idea* only — no PBA code in our mod (grep
+      clean) — but a gracious "an alternative to PBA" nod in the README is good
+      community form, not an obligation.
 
 ## DEFERRED — Zero-player autonomy
 
