@@ -86,16 +86,24 @@ re-queued or retried.
 
 ### Standing rule
 
+`data/rules.json` — a bare list, or `{ "rules": [...] }`:
+
 ```json
-{
-  "rules": [
-    { "id": "paldium", "item": "Pal_crystal_S", "min": 500, "target": 1000, "batch": 200 }
-  ]
-}
+[
+  { "id": "paldium", "item": "Pal_crystal_S", "min": 500, "target": 1000,
+    "batch": 200, "maxInProgress": 400 }
+]
 ```
-`item` = inventory id to watch, `recipe` defaults to `item`, `target` defaults to
-`min`, `batch` caps one top-up. When `have + inflight < min`, an order for
-`target - have - inflight` (capped at `batch`) is queued.
+`item` = inventory id to watch · `recipe` defaults to `item` · `target` defaults to
+`min` · `batch` caps one top-up · `maxInProgress` caps queued+producing at once ·
+`baseId` / `machine` restrict where it crafts · `transport` (default true).
+
+When `have + inProgress < min`, an order for `target - have - inProgress` (capped
+at `batch` and `maxInProgress`) is queued. `inProgress` counts queued orders +
+`remaining` on stations set to it + our just-placed orders. After a rule fires it
+waits `RuleCooldownSeconds` (config, default 90) before it can fire again.
+`state.json` → `rules[]` shows each rule's `{ have, min, target, inProgress, low,
+onCooldown }`.
 
 ## config.ini
 

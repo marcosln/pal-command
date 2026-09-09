@@ -41,6 +41,7 @@ local CFG = {
     enabled = util.as_bool(ini.enabled, true),
     scan_interval = util.as_int(ini.scanintervalseconds, 20, 5, 3600),
     idle_scan_interval = util.as_int(ini.idlescanintervalseconds, 120, 10, 7200),
+    rule_cooldown = util.as_int(ini.rulecooldownseconds, 90, 0, 86400),
     max_orders_per_flush = util.as_int(ini.maxordersperflush, 8, 1, 64),
     default_transport = util.as_bool(ini.defaulttransporttostorage, true),
     include_guild = util.as_bool(ini.includeguildchest, true),
@@ -94,13 +95,25 @@ local function queue_has(recipe, source)
     return false
 end
 
+--- How much of `recipe` is already queued or being produced -- the anti-spam basis
+--- for standing rules. Counts: pending queue orders + `remaining` on any station
+--- currently set to it + our just-placed orders not yet visible in the snapshot.
 local function inflight_for(recipe, stations)
     local total = 0
     for _, o in ipairs(S.queue) do
         if o.recipe == recipe then total = total + (tonumber(o.count) or 0) end
     end
+    local counted = {}
     for _, st in ipairs(stations or {}) do
-        if st.state.recipe == recipe then total = total + st.state.remaining end
+        if st.state.recipe == recipe then
+            total = total + (tonumber(st.state.remaining) or 0)
+            counted[tostring(st.obj)] = true
+        end
+    end
+    for _, w in ipairs(engine._placed_watch or {}) do
+        if w.recipe == recipe and not counted[tostring(w.station)] then
+            total = total + (tonumber(w.count) or 0)   -- placed, not in the snapshot yet
+        end
     end
     return total
 end
@@ -214,18 +227,49 @@ local function ingest_orders()
 end
 
 --- Derive orders from standing rules and enqueue any that are missing.
+-- Each rule has a cooldown after it fires (CFG.rule_cooldown) so a wobbling
+-- inventory count can't make it thrash. rules.json survives restarts; the
+-- cooldown state is in-memory (worst case: one extra fire right after a restart).
 local function apply_rules(totals, stations)
     local raw = util.read_file(PATHS.rules)
     local rule_list = raw and json.decode(raw)
     if type(rule_list) ~= "table" then return end
 
-    local derived = rules.evaluate(rule_list, totals, function(r) return inflight_for(r, stations) end)
+    S.ruleFiredAt = S.ruleFiredAt or {}
+    local now = os.time()
+    local function cd_ok(rid)
+        local last = S.ruleFiredAt[rid]
+        return not last or (now - last) >= CFG.rule_cooldown
+    end
+    local derived = rules.evaluate(rule_list, totals,
+        function(r) return inflight_for(r, stations) end, { cooldown_ok = cd_ok })
+
+    -- publish a per-rule status for the app (and to see what the rules are doing)
+    local list = (type(rule_list.rules) == "table") and rule_list.rules or rule_list
+    S.ruleStatus = {}
+    for _, rule in ipairs(type(list) == "table" and list or {}) do
+        if type(rule) == "table" and type(rule.item) == "string" then
+            local rid = tostring(rule.id or rule.item)
+            local have = tonumber(totals[rule.item]) or 0
+            local mn = tonumber(rule.min) or 0
+            local wip = inflight_for(rule.recipe or rule.item, stations)
+            S.ruleStatus[#S.ruleStatus + 1] = {
+                id = rid, item = rule.item, enabled = rule.enabled ~= false,
+                have = have, min = mn, target = tonumber(rule.target) or mn,
+                inProgress = wip, low = (have + wip) < mn,
+                onCooldown = not cd_ok(rid),
+                lastFired = S.ruleFiredAt[rid],
+            }
+        end
+    end
+
     local added = 0
     for _, o in ipairs(derived) do
         if not queue_has(o.recipe, o.source) then
-            o.id = o.source .. "@" .. os.time()
+            o.id = o.source .. "@" .. now
             o.attempts = 0
             S.queue[#S.queue + 1] = o
+            S.ruleFiredAt[(tostring(o.source):gsub("^rule:", ""))] = now
             added = added + 1
         end
     end
@@ -285,6 +329,7 @@ local function write_state()
         queueDepth = #S.queue,
         queue = S.queue,
         recent = S.recent,
+        rules = S.ruleStatus,
         engine = st,
         playerIdProbe = (st.backend == "native" and discovery.player_id_probe) and discovery.player_id_probe() or nil,
         note = st.backend == "replay"
