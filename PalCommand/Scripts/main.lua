@@ -203,6 +203,7 @@ local function write_state()
         queue = S.queue,
         recent = S.recent,
         engine = st,
+        playerIdProbe = (st.backend == "native" and discovery.player_id_probe) and discovery.player_id_probe() or nil,
         note = st.backend == "replay"
             and "replay backend: queued orders apply next time any player changes a recipe"
             or "native backend: orders apply within one scan interval",

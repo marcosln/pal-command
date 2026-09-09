@@ -270,14 +270,66 @@ end
 
 --- Resolve the acting player id (int32 net id) for autonomous / fallback use.
 function M.any_player_id()
-    for _, ps in ipairs(util.find_all("PalPlayerState")) do
-        if valid(ps) and not_default(ps) then
-            local pid = ok(function() return ps:GetPlayerId() end)
-            if pid == nil then pid = ok(function() return ps.PlayerId end) end
-            if pid ~= nil then return math.floor(pid) end
+    local p = M.player_id_probe()
+    return p and p.id or nil
+end
+
+--- Try every source for a usable RequestPlayerId. Returns { id, source, candidates }.
+function M.player_id_probe()
+    local cands = {}
+    local function add(src, v)
+        if v ~= nil then
+            local n = tonumber(v)
+            if n and n ~= 0 then cands[#cands + 1] = { source = src, id = math.floor(n) } end
         end
     end
-    return nil
+
+    -- 1. connected player states
+    for _, ps in ipairs(util.find_all("PalPlayerState")) do
+        if valid(ps) then
+            add("PalPlayerState:GetPlayerId", ok(function() return ps:GetPlayerId() end))
+            add("PalPlayerState.PlayerId", ok(function() return ps.PlayerId end))
+            add("PalPlayerState.PlayerIdOnServer", ok(function() return ps.PlayerIdOnServer end))
+        end
+    end
+
+    -- 2. character / player controllers
+    for _, pc in ipairs(util.find_all("PalPlayerController")) do
+        if valid(pc) then
+            local ps = ok(function() return pc.PlayerState end)
+            if ps then add("PalPlayerController.PlayerState:GetPlayerId", ok(function() return ps:GetPlayerId() end)) end
+        end
+    end
+
+    -- 3. persistent player records (offline members) -- these survive logout
+    for _, rec in ipairs(util.find_all("PalPlayerDataStorage")) do
+        if valid(rec) then
+            local list = ok(function() return rec.PlayerDataContainerMap end)
+                or ok(function() return rec.PlayerDataContainer end)
+            -- best-effort: many builds expose GetAllPlayerUId / GetPlayerList
+            add("PalPlayerDataStorage:GetLastPlayerUId", ok(function() return rec:GetLastPlayerUId() end))
+        end
+    end
+
+    -- 4. group / guild manager -- a base always belongs to a group with members
+    for _, gm in ipairs(util.find_all("PalGroupManager")) do
+        if valid(gm) then
+            local ok_iter = pcall(function()
+                gm:ForEachGroup(function(g)
+                    local players = ok(function() return g.players end) or ok(function() return g.RawGroupData and g.RawGroupData.players end)
+                    if players then
+                        players:ForEach(function(_, entry)
+                            local e = entry:get()
+                            add("PalGroupManager.group.player", ok(function() return e.player_uid end) or ok(function() return e.PlayerUId end))
+                        end)
+                    end
+                end)
+            end)
+        end
+    end
+
+    local pick = cands[1]
+    return { id = pick and pick.id or nil, source = pick and pick.source or "none", candidates = cands }
 end
 
 return M

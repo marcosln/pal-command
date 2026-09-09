@@ -50,27 +50,45 @@ function M.resolve_layout()
     local trig = ok(function() return StaticFindObject(TRIGGER) end)
     if not fn then return nil, "ChangeRecipe UFunction not found" end
 
-    local player_off, archive_off
+    local player_off, archive_off, archive_size, max_end
     pcall(function()
         fn:ForEachProperty(function(p)
             local nm = util.fstr(ok(function() return p:GetFName() end))
             local off = ok(function() return p:GetOffset() end)
                 or ok(function() return p:GetOffset_Internal() end)
+            local sz = ok(function() return p:GetSize() end)
+                or ok(function() return p:GetPropertySize() end)
+            if off and sz then
+                local e = off + sz
+                if not max_end or e > max_end then max_end = e end
+            end
             if nm == "RequestPlayerId" then player_off = off end
-            if nm == "Archive" then archive_off = off end
+            if nm == "Archive" then archive_off = off; archive_size = sz end
         end)
     end)
     if player_off == nil or archive_off == nil then
         return nil, "could not read param offsets (player=" .. tostring(player_off) .. " archive=" .. tostring(archive_off) .. ")"
     end
 
+    -- UFunction ParmsSize: prefer the reflected value, else largest (offset+size),
+    -- else fall back to archive_off + a generous FPalNetArchive size.
+    local parms = ok(function() return fn:GetParmsSize() end)
+        or ok(function() return fn.ParmsSize end)
+        or ok(function() return fn:GetPropertiesSize() end)
+    local params_size = parms or max_end or (archive_off + (archive_size or 16))
+    -- round up to 16 and give ProcessEvent a little headroom
+    params_size = math.ceil(params_size / 16) * 16
+
     M._layout = {
         rpc_addr = ok(function() return fn:GetAddress() end),
         trigger_addr = trig and ok(function() return trig:GetAddress() end) or nil,
         player_off = player_off,
         archive_off = archive_off,
-        bytes_off = 0,                       -- FPalNetArchive.Bytes is the first/only field
-        params_size = archive_off + 16,      -- + sizeof(FPalNetArchive) = TArray header
+        archive_size = archive_size,
+        bytes_off = 0,                       -- FPalNetArchive.Bytes (TArray) is the first field
+        params_size = params_size,
+        parms_reflected = parms,
+        max_end = max_end,
     }
     return M._layout
 end
@@ -160,6 +178,13 @@ local function native_submit(station_obj, pid, want, order)
     }, "\n")
 
     if not util.write_file(p.request, body) then return false, "could not write native-request.ini" end
+
+    if not M._layout_logged then
+        M._layout_logged = true
+        util.log(string.format("native layout: player_off=%s archive_off=%s archive_size=%s params_size=%s parms_reflected=%s max_end=%s | pid=%s",
+            tostring(L.player_off), tostring(L.archive_off), tostring(L.archive_size), tostring(L.params_size),
+            tostring(L.parms_reflected), tostring(L.max_end), tostring(pid)))
+    end
 
     M._native_pending = { rid = rid, station = station_obj, order = order, at = os.time(), pokes = 0 }
     poke_trigger(station_obj)
@@ -251,6 +276,20 @@ function M.backend()
     return "replay"
 end
 
+--- Best RequestPlayerId for an autonomous order: a pid seen this session, then a
+--- persisted one, then a live probe. nil if nothing found (caller falls back to 0).
+function M.acting_pid()
+    if M._last_real_pid and M._last_real_pid ~= 0 then return M._last_real_pid end
+    if M._cfg.data_dir then
+        local raw = util.read_file(M._cfg.data_dir .. "\\last-pid.txt")
+        local n = raw and tonumber((raw:gsub("%s", "")))
+        if n and n ~= 0 then M._last_real_pid = math.floor(n); return M._last_real_pid end
+    end
+    local probed = discovery.any_player_id()
+    if probed and probed ~= 0 then return probed end
+    return nil
+end
+
 --- @param order { recipe, count, transport, baseId? }
 --- @param ctx   { pid, archive? }
 --- @return placed:boolean, detail:string, soft:boolean  (soft = not placed but not a real failure -- keep waiting)
@@ -266,7 +305,7 @@ function M.place(order, ctx)
     end
 
     local want = bytes.build(recipe, count, transport)
-    local pid = (ctx and ctx.pid) or discovery.any_player_id() or 0
+    local pid = (ctx and ctx.pid) or M.acting_pid() or 0
 
     if M.native_ready() then
         if M._native_pending then
@@ -335,6 +374,13 @@ function M.install_hook()
                 if M._flushing then return end
                 pcall(function()
                     local pid = a:get()
+                    -- remember a real RequestPlayerId for autonomous (native) orders
+                    if pid and tonumber(pid) and tonumber(pid) ~= 0 then
+                        M._last_real_pid = math.floor(tonumber(pid))
+                        if M._cfg.data_dir then
+                            pcall(function() util.write_file(M._cfg.data_dir .. "\\last-pid.txt", tostring(M._last_real_pid)) end)
+                        end
+                    end
                     local archive = b:get()
                     if archive == nil or archive.Bytes == nil then return end
                     local original = snapshot_archive(archive)
