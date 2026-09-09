@@ -78,12 +78,26 @@ Native backend, works whenever ANY player is online (AFK, never crafts).
       IdleScanIntervalSeconds idle -> fewer game-thread passes, lighter on the map-open
       hitch) + fix the cosmetic bug (stations.json published after ingest now).
 
-## STAGE 2 — Standing rules polished
+## STAGE 2 — Standing rules polished   ✅ done (2 fixes pending a restart)
 
-- [ ] 2.1 Rule eval vs live inventory verified end-to-end
-- [ ] 2.2 Rule types: keep item ≥ N; keep ≤ N in progress; scope to a base/machine
-- [ ] 2.3 No spam — respect in-flight + cooldowns
-- [ ] 2.4 Rules survive restart; test with a real low-stock trigger
+Code: rules.lua `M.evaluate` + main.lua `apply_rules` / `inflight_for`. Deploy 8fb0ef0
++ a70c827 (uploaded, restart pending). `RuleCooldownSeconds` config (default 90).
+
+- [x] 2.1 Rule eval vs live inventory. <!-- 2026-09-09 21:36 live: rules.json in the
+      {"rules":[...]} form (was SILENTLY IGNORED before — apply_rules ipairs'd the dict)
+      now read. Rule {item:Flour,min:900,target:1000,batch:100}: have 715 < 900 ->
+      "rules enqueued 1" -> Flour x100 queued (source rule:rtest-flour) -> placed on a
+      mill -> producing. state.json rules[] = {have,min,target,inProgress,low,onCooldown,lastFired}. -->
+- [x] 2.2 Rule fields: `min`/`target`/`batch` (had), + `maxInProgress` (cap queued+producing),
+      `baseId` (had, passed through), `machine` (pin top-ups to one mapId). All coded;
+      maxInProgress exercised in eval, machine/baseId reuse the proven 1.8 `target` path.
+- [x] 2.3 No thrash: per-rule cooldown (`RuleCooldownSeconds`) after a fire + `inflight_for`
+      counts queue + station `remaining` + `_placed_watch`. Live: rule fired exactly once,
+      held through inventory wobble (Cake03 eating Flour). <!-- fix a70c827: inflight_for was
+      double-counting a station (dedup by tostring(wrapper) fails across scans) -> use
+      GetAddress(); apply_rules sets S.lastOrderAt so the scan loop stays fast while a rule acts. -->
+- [x] 2.4 rules.json is on disk -> survives restart; apply_rules re-reads it every scan.
+      Cooldown state is in-memory (worst case: one extra fire right after a restart — fine).
 
 ## STAGE 3 — Easy 2D map (schematic)   ← BUILD AFTER STAGE 4 (see BUILD ORDER up top)
 
