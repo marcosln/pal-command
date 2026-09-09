@@ -194,9 +194,9 @@ end
 M._native_pending = nil   -- { rid, station, order, at, pokes }
 
 -- Native orders whose recipe the game accepted, kept until that recipe leaves the
--- machine (completed / starved / cancelled). Doubles as the ledger of "recipes we
--- set" so M.cancel() only ever touches our own crafts, never a player's.
-M._placed_watch = {}      -- [{ station, recipe, count, target, at, ever_workable, progressed, last_remaining, warned }]
+-- machine (completed / cancelled). Doubles as the ledger of "recipes we set" so
+-- M.cancel() only ever touches our own crafts, never a player's.
+M._placed_watch = {}      -- [{ station, recipe, count, target, at, ever_workable, progressed, stalled }]
 
 local function poke_trigger(station_obj)
     pcall(function() if station_obj then station_obj:GetCurrentRecipeId() end end)
@@ -361,12 +361,12 @@ function M.native_tick()
                     pcall(M._on_result, pend.order, true,
                         string.format("native: verified %s req=%s", tostring(now.recipe), tostring(now.requested)), false)
                 end
-                -- Watch it: recipe is set, but is a Pal actually going to work it?
+                -- Track it: our ledger for M.cancel(), and a soft "is it actually
+                -- producing?" check (see M.sweep_placed_watch).
                 M._placed_watch[#M._placed_watch + 1] = {
                     station = pend.station, recipe = pend.expect_recipe, count = pend.expect_count,
                     target = pend.order and (pend.order.target or pend.order.baseId) or nil,
-                    at = os.time(), ever_workable = (now.workable == true), progressed = false,
-                    last_remaining = tonumber(now.remaining) or pend.expect_count, warned = false,
+                    at = os.time(), ever_workable = (now.workable == true), progressed = false, stalled = false,
                 }
                 -- Queue-drain: if more orders wait and a player is still connected,
                 -- submit the next one right away instead of waiting a scan cycle.
@@ -592,14 +592,15 @@ end
 
 -- ---------------------------------------------------------------- placement watch / cancel
 
---- Re-check native orders whose recipe we set: is a Pal actually working them?
---- `workable` right at placement is flaky (furnaces report false for a beat), so
---- we judge over time -- became workable, or `remaining` dropped below the request
---- = healthy. A recipe that sits unworkable with no progress past ~75s is starved
---- (missing ingredients / furnace fuel / no free Pal slot) -> one warning.
---- When the recipe leaves the machine we stop watching without a verdict: it could
---- be a completed batch, a cancel, or a slow starve -- the proactive check above
---- has already caught the clear starve cases. Pure reads.
+--- Track native orders whose recipe we set. Two jobs:
+---  1. the ledger of "recipes WE set" -> M.cancel() only ever touches our own.
+---  2. a soft, informational `stalled` flag: the recipe is placed and legit but no
+---     Pal is working it yet (no power / no kindling Pal / no fuel). This is NOT a
+---     failure -- the game produces it once the base can -- so we never re-queue,
+---     never retry; we just note it once (log + state.json) so the app can show it.
+--- `workable` right at placement is flaky (furnaces report false for a beat), so we
+--- judge over time: became workable, or `remaining` dropped below the request.
+--- Entries drop when the recipe leaves the machine (completed / cancelled). Pure reads.
 function M.sweep_placed_watch()
     if #M._placed_watch == 0 then return end
     local t = os.time()
@@ -612,19 +613,19 @@ function M.sweep_placed_watch()
             if st.workable == true then w.ever_workable = true end
             local rem = tonumber(st.remaining)
             if rem and rem > 0 and rem < (w.count or math.huge) then w.progressed = true end
+            local working = w.ever_workable or w.progressed
             local age = t - w.at
-            local healthy = w.ever_workable or w.progressed
-            if not healthy and age > 75 and not w.warned then
-                w.warned = true
-                if type(M._on_starved) == "function" then
-                    pcall(M._on_starved, w, "placed but not working after " .. age
-                        .. "s -- check materials / furnace fuel / a free Pal work slot")
-                end
-            elseif healthy and age > 300 then
-                table.remove(M._placed_watch, i)   -- confirmed working; stop watching
+            if not working and age > 90 and not w.stalled then
+                w.stalled = true
+                util.log(string.format(
+                    "note: %s x%s @ %s placed, not producing yet (no power / kindling Pal / fuel) -- the base will craft it when it can",
+                    tostring(w.recipe), tostring(w.count), tostring(w.target or "?")))
+            elseif working and w.stalled then
+                w.stalled = false   -- it got going on its own
             end
         end
     end
+    while #M._placed_watch > 60 do table.remove(M._placed_watch, 1) end
 end
 
 --- One-shot: log the param layout + flags of Cancel_ServerInternal so we know how
@@ -688,8 +689,9 @@ function M.stats()
     s.placedWatch = {}
     for _, w in ipairs(M._placed_watch) do
         s.placedWatch[#s.placedWatch + 1] = {
-            recipe = w.recipe, count = w.count, target = w.target,
-            age = os.time() - w.at, everWorkable = w.ever_workable, progressed = w.progressed, warned = w.warned,
+            recipe = w.recipe, count = w.count, target = w.target, age = os.time() - w.at,
+            working = (w.ever_workable or w.progressed) or false,
+            stalled = w.stalled or false,   -- placed but not producing yet (no power / Pal / fuel)
         }
     end
     return s

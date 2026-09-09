@@ -66,9 +66,14 @@ recipe on any machine **PalCommand** set for a match (never a machine a player s
 
 ### `state.json` result kinds (`recent[]`)
 
-`placed` · `dropped` (gave up after retries) · `cancelled` · `cancel-failed` ·
-`warning` — recipe was set but no Pal is working it (missing materials, furnace
-fuel, or no free work slot); the order is not actually producing.
+`placed` · `dropped` (no station makes it / gave up after retries) · `cancelled` ·
+`cancel-failed`.
+
+A placed order that isn't producing yet (the machine has no power, no kindling
+Pal, or no fuel) is **not** a failure — the game crafts it once the base can.
+`state.json` → `engine.placedWatch[]` carries `{ recipe, target, working, stalled }`
+so the app can show a soft "waiting on the base" badge; the order is never
+re-queued or retried.
 
 ### Standing rule
 

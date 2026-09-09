@@ -246,15 +246,6 @@ engine._on_result = function(order, placed, detail, soft)
     persist_queue()
 end
 
---- A native order's recipe was set but no Pal is working it (missing materials,
---- furnace fuel, or no free work slot). Surface it -- don't leave it looking placed.
-engine._on_starved = function(w, reason)
-    push_recent({ recipe = w.recipe, count = w.count, result = "warning",
-        detail = reason, source = "order", target = w.target })
-    util.log(string.format("WARN %s x%s @ %s -- %s",
-        tostring(w.recipe), tostring(w.count), tostring(w.target or "?"), tostring(reason)))
-end
-
 -- ---------------------------------------------------------------- publish
 
 local function write_state()
@@ -331,7 +322,8 @@ local function scan_cycle(reason, light)
             engine.flush({})
         end
 
-        -- did the game actually start the recipes we set? warn on any it dropped.
+        -- track recipes we set (ledger for cancel) + flag any placed-but-not-producing
+        -- yet (no power / Pal / fuel) as a soft status, never a failure.
         if type(engine.sweep_placed_watch) == "function" then pcall(engine.sweep_placed_watch) end
 
         S.lastScan = os.date("!%Y-%m-%dT%H:%M:%SZ")
