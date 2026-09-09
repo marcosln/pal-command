@@ -43,6 +43,16 @@ Native backend, works whenever ANY player is online (AFK, never crafts).
 - [ ] 1.5 "Craft X on ALL machines that can" — batch order fan-out
 - [ ] 1.6 Stress: full queue (8+), verify drain, timing, and that joins never block
 - [ ] 1.7 Replay fallback still correct when native is off (same-length recipe ids)
+- [ ] 1.8 **Two targeting modes, user-picked per order (user, 2026-09-09):**
+      (a) **PIN** — `target` + `pin:true`: this exact machine only. If it's busy, the
+          order WAITS in a per-machine FIFO sub-queue and places when that machine
+          frees — never falls through to another. Multiple pinned orders for one
+          machine = an ordered backlog on it.
+      (b) **ANY** (default, exists today as a soft `target`): place on the best free
+          capable machine now; `target` (no `pin`) only nudges the choice.
+      Engine: `M.place` respects `pin` (return soft-wait, don't scan other candidates);
+      queue keeps pinned orders in arrival order per `target`. Surfaced in the app
+      (Stage 4) + the map order-sheet (3.4).
 
 ## STAGE 2 — Standing rules polished
 
@@ -55,8 +65,11 @@ Native backend, works whenever ANY player is online (AFK, never crafts).
 
 - [ ] 3.1 Read positions: bases, machines, chests, Pals (needs 1.2 position work)
 - [ ] 3.2 `map.json` published by the mod (normalized coords + labels)
-- [ ] 3.3 PWA canvas: bases as regions, machines as icons by type, Pals as dots
-- [ ] 3.4 Tap a machine → order sheet prefilled
+- [ ] 3.3 PWA canvas: bases as regions, machines as icons by type, Pals as dots.
+      Each machine shows its live state: current recipe + remaining, or idle, or
+      `stalled` (placed, not producing — no power/Pal/fuel), from `state.json`.
+- [ ] 3.4 Tap a machine → order sheet prefilled, with the 1.8 mode toggle:
+      "this machine (queue if busy)" vs "any free machine".
 - [ ] 3.5 (later) overlay on the real Palworld map image
 
 ## STAGE 4 — Cloud Worker + PWA wired to live data
