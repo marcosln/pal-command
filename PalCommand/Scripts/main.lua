@@ -46,11 +46,8 @@ local CFG = {
     max_attempts = util.as_int(ini.maxorderattempts, 6, 1, 100),
     worker_url = ini.workerbaseurl or "",
     server_token = ini.servertoken or "",
-    replay_hook = util.as_bool(ini.enablereplayhook, true),   -- set false to leave Func pristine for disasm
-    -- DESTRUCTIVE one-shot: "offline_selftest=Pal_crystal_S" fires one pid-0 native
-    -- ChangeRecipe at an idle station ~45s after boot, no connected-player guard.
-    -- Blank = off. Remove after the single test run.
-    offline_selftest = ini.offlineselftest or "",
+    replay_hook = util.as_bool(ini.enablereplayhook, true),
+    debug_diag = util.as_bool(ini.debugdiagnostics, false),   -- RE diagnostics one-shots (zero-player research)
 }
 
 -- ---------------------------------------------------------------- state
@@ -361,66 +358,23 @@ local function boot()
         end)
     end
 
-    -- one-shot diagnostics for the no-player-entry hunt (each guarded, on the game thread)
-    if type(ExecuteWithDelay) == "function" then
+    -- Optional one-shot RE diagnostics (zero-player autonomy research). Off unless
+    -- config DebugDiagnostics=true. The connected-player product does not need them.
+    if CFG.debug_diag and type(ExecuteWithDelay) == "function" then
         ExecuteWithDelay(20000, function()
             local function go()
                 local okk, api = pcall(discovery.dump_convert_api)
                 if okk then
                     util.write_file(ROOT .. "\\data\\convert-api.json", json.encode(api))
                     util.log("convert-api dumped: " .. #api .. " entries")
-                else
-                    util.log("convert-api dump failed: " .. tostring(api))
                 end
-                -- OnRep_* + work-entry candidates -> UFunction addrs for disasm
-                local P = "/Script/Pal.PalMapObjectConvertItemModel:"
-                local fns = engine.resolve_fn_addrs and engine.resolve_fn_addrs({
-                    P .. "OnRep_CurrentRecipeId", P .. "OnRep_RequestedProductNum",
-                    P .. "OnRep_RemainProductNum", P .. "OnRep_IsWorkable",
-                    "/Script/Pal.PalMapObjectConcreteModelBase:OnRep_ModuleArray",
-                    P .. "OnStartWorkAnyone_ServerInternal", P .. "OnEndWorkAnyone_ServerInternal",
-                    P .. "OnFinishWorkInServer",
-                }) or {}
-                util.write_file(ROOT .. "\\data\\fn-addrs.json", json.encode(fns))
-                util.log("fn-addrs dumped")
-            end
-            if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
-        end)
-        ExecuteWithDelay(28000, function()
-            local function go()
-                if not (engine.native_ready and engine.native_ready() and engine.request_inspect) then return end
-                local st = discovery.station_for("Pal_crystal_S")
-                if st and st.obj then
-                    local okk, err = engine.request_inspect(st.obj)
-                    util.log("r12b inspect: " .. tostring(okk) .. " " .. tostring(err))
-                end
-            end
-            if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
-        end)
-        -- observe r12b live (calls the predicate chain read-only) -- Codex step
-        for _, delay in ipairs({ 40000, 52000 }) do
-            ExecuteWithDelay(delay, function()
-                local function go()
-                    if not (engine.native_ready and engine.native_ready() and engine.request_callpred) then return end
+                if engine.request_callpred then
                     local st = discovery.station_for("Pal_crystal_S")
-                    if st and st.obj then
-                        local okk, err = engine.request_callpred(st.obj)
-                        util.log("r12b callpred: " .. tostring(okk) .. " " .. tostring(err))
-                    end
+                    if st and st.obj then engine.request_callpred(st.obj) end
                 end
-                if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
-            end)
-        end
-        -- DESTRUCTIVE offline self-test (Codex step 2), config-gated, once.
-        if CFG.offline_selftest ~= "" and engine.offline_selftest then
-            ExecuteWithDelay(64000, function()
-                local function go()
-                    util.log("SELFTEST: firing offline_selftest=" .. CFG.offline_selftest)
-                    engine.offline_selftest(CFG.offline_selftest, 1)
-                end
-                if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
-            end)
-        end
+            end
+            if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
+        end)
     end
     schedule_loop()
     schedule_native_poll()

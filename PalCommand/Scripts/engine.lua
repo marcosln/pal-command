@@ -7,13 +7,14 @@
 --               station address, the ChangeRecipe UFunction address, the param
 --               offsets (from live reflection) and the recipe bytes via
 --               data/native-request.ini, then poke a trigger so it dispatches
---               ChangeRecipe_ServerInternal on the game thread.
---               LIMITATION (2026-09-09): ChangeRecipe_ServerInternal validates the
---               RequestPlayerId against a *connected* PalPlayerController and its
---               guild. With nobody connected it is a silent no-op. So the native
---               backend currently needs at least one player online (AFK is fine --
---               they do not have to craft). Orders stay queued until then. Full
---               zero-player autonomy is pending a disasm-driven bypass.
+--               ChangeRecipe_ServerInternal on the game thread. Works for ANY
+--               recipe on ANY station across every base, and drains the whole
+--               queue order-by-order.
+--               NEEDS: at least one player connected (AFK is fine -- they never
+--               have to craft anything). ChangeRecipe_ServerInternal is a silent
+--               no-op with nobody online; orders stay queued and flush the moment
+--               someone connects. (Zero-player autonomy is a separate, later goal
+--               -- see notes/para-codex-*.md.)
 --
 --   replay   -- pure Lua. A persistent POST hook on ChangeRecipe_ServerInternal:
 --               whenever a player changes a recipe we borrow that live
@@ -305,40 +306,6 @@ function M.request_callpred(station_obj)
     return true
 end
 
---- One-shot DESTRUCTIVE diagnostic (Codex step 2): fire a native ChangeRecipe at
---- an idle station with pid 0 and NO connected-player guard. NOT reversible -- if
---- the game accepts it, a Pal will craft and consume materials. Gated by
---- config `offline_selftest=<recipe>`; runs once per boot. Logs everything.
-function M.offline_selftest(recipe, count)
-    recipe = tostring(recipe or "")
-    count = math.max(1, math.floor(tonumber(count) or 1))
-    if M._selftest_done then return end
-    M._selftest_done = true
-    if not M.native_ready() then util.log("SELFTEST abort: native backend not ready"); return end
-    if M._native_pending then util.log("SELFTEST abort: native busy"); return end
-
-    local station = discovery.station_for(recipe)
-    if not station or not valid(station.obj) then
-        util.log("SELFTEST abort: no idle station makes '" .. recipe .. "'"); return
-    end
-    local addr = ok(function() return string.format("%X", station.obj:GetAddress()) end) or "?"
-    local s0 = discovery.station_state(station.obj)
-    local idle = (s0.recipe == nil or s0.recipe == "" or s0.recipe == "None")
-        and (tonumber(s0.requested) or 0) == 0 and not s0.workable
-    util.log(string.format(
-        "SELFTEST station=%s base=%s idle=%s BEFORE{recipe=%s req=%s rem=%s workable=%s}",
-        addr, tostring(station.baseName), tostring(idle),
-        tostring(s0.recipe), tostring(s0.requested), tostring(s0.remaining), tostring(s0.workable)))
-    if not idle then util.log("SELFTEST abort: station not idle"); return end
-
-    local want = bytes.build(recipe, count, true)
-    local order = { id = "selftest", recipe = recipe, count = count, transport = true, source = "selftest" }
-    local okk, serr = native_submit(station.obj, 0, want, order)
-    util.log(string.format("SELFTEST native_submit(pid=0, %s x%d) -> %s %s",
-        recipe, count, tostring(okk), tostring(serr or "")))
-    -- native_tick() (already on the 650ms timer) will poke the trigger, reap the
-    -- bridge response, and log "native: ... VERIFIED" or "... station unchanged".
-end
 
 --- Poke the trigger + reap the bridge response. Cheap; safe to call ~1x/sec from
 --- the game thread. Resolves M._native_pending via M._on_result.
@@ -389,9 +356,16 @@ function M.native_tick()
                     pcall(M._on_result, pend.order, true,
                         string.format("native: verified %s req=%s", tostring(now.recipe), tostring(now.requested)), false)
                 end
+                -- Queue-drain: if more orders wait and a player is still connected,
+                -- submit the next one right away instead of waiting a scan cycle.
+                if not M._native_pending and type(M._provider) == "function"
+                   and discovery.connected_player_id() then
+                    local more = M._provider()
+                    if type(more) == "table" and #more > 0 then pcall(M.flush, {}) end
+                end
             else
                 M._stats.lastError = string.format(
-                    "native: ProcessEvent returned but station unchanged (recipe=%s want=%s) -- waiting-for-connected-player",
+                    "native: ProcessEvent returned but station unchanged (recipe=%s want=%s) -- re-queued",
                     tostring(now.recipe), tostring(pend.expect_recipe))
                 util.log(M._stats.lastError)
                 if type(M._on_result) == "function" then
@@ -465,7 +439,12 @@ function M.backend()
     return "replay"
 end
 
---- @param order { recipe, count, transport, baseId? }
+local function is_idle(s)
+    return (s.recipe == nil or s.recipe == "" or s.recipe == "None")
+        and (tonumber(s.requested) or 0) == 0 and not s.workable
+end
+
+--- @param order { recipe, count, transport, baseId?, stationKey? }
 --- @param ctx   { pid, archive? }
 --- @return placed:boolean, detail:string, soft:boolean  (soft = not placed but not a real failure -- keep waiting)
 function M.place(order, ctx)
@@ -474,61 +453,70 @@ function M.place(order, ctx)
     local transport = order.transport
     if transport == nil then transport = true end
 
-    local station = discovery.station_for(recipe, order.baseId)
-    if not station or not valid(station.obj) then
+    local candidates = {}
+    for _, s in ipairs(discovery.stations_for(recipe, order.baseId, order.stationKey)) do
+        if valid(s.obj) then candidates[#candidates + 1] = s end
+    end
+    if #candidates == 0 then
         return false, "no station makes '" .. tostring(recipe) .. "'"
     end
 
     local want = bytes.build(recipe, count, transport)
 
+    -- ---- native backend: pick the first IDLE candidate and dispatch there ----
     if M.native_ready() then
         if M._native_pending then
-            -- one native order in flight; M.native_tick() will clear it
             return false, "native: busy with " .. tostring(M._native_pending.expect_recipe), true
         end
-        -- Only target an IDLE station -- so a verified recipe change is unambiguous
-        -- (a busy station could already show our recipe/count and mask a rejection).
-        local s0 = discovery.station_state(station.obj)
-        local idle = (s0.recipe == nil or s0.recipe == "" or s0.recipe == "None")
-            and (tonumber(s0.requested) or 0) == 0 and not s0.workable
-        if not idle then
-            return false, string.format("native: station busy (recipe=%s req=%s) -- waiting for an idle one", tostring(s0.recipe), tostring(s0.requested)), true
+        local anyone = discovery.connected_player_id()
+        if not anyone then
+            return false, "native: no player connected -- order queued (any player online, AFK ok)", true
         end
-        -- ChangeRecipe_ServerInternal resolves the caller's guild and matches it
-        -- against the station's base. Need a connected player, ideally in that guild.
-        local cpid, why = discovery.connected_player_for_station(station.obj)
-        if not cpid then
-            return false, "native: no connected player -- order queued (needs a player online)", true
+        local busy_seen
+        for _, station in ipairs(candidates) do
+            local s0 = discovery.station_state(station.obj)
+            if is_idle(s0) then
+                -- prefer a guild-matched pid for this station; fall back to any connected
+                local pid = select(1, discovery.connected_player_for_station(station.obj)) or anyone
+                local okk, serr = native_submit(station.obj, pid, want, order)
+                if okk then
+                    return false, string.format("native: submitted %s x%d @ %s (station %s) pid=%d -- verifying",
+                        recipe, count, station.baseName, station.key, pid), true
+                end
+                if not (ctx and ctx.archive) then return false, "native: " .. tostring(serr) end
+                util.log("native submit failed (" .. tostring(serr) .. "); trying replay")
+                break
+            else
+                busy_seen = string.format("%s@%s(recipe=%s req=%s)", station.key, station.baseName,
+                    tostring(s0.recipe), tostring(s0.requested))
+            end
         end
-        local okk, serr = native_submit(station.obj, cpid, want, order)
-        if okk then
-            return false, string.format("native: submitted %s x%d @ %s pid=%d (%s) -- verifying", recipe, count, station.baseName, cpid, tostring(why)), true
+        if not (ctx and ctx.archive) then
+            return false, "native: all matching stations busy [" .. tostring(busy_seen) .. "] -- waiting for one to free up", true
         end
-        if not (ctx and ctx.archive) then return false, "native: " .. tostring(serr) end
-        util.log("native submit failed (" .. tostring(serr) .. "); trying replay")
     end
 
-    -- replay: rewrite a live archive from a player's craft and re-dispatch it. The
-    -- pid here is that player's real (connected) RequestPlayerId, so it is valid.
+    -- ---- replay backend: rewrite a live player archive to an idle candidate ----
     local pid = (ctx and ctx.pid) or 0
     local archive = ctx and ctx.archive
     if archive == nil then
         return false, "replay backend needs a live archive (waiting for a player craft)", true
     end
-    local r0 = discovery.station_state(station.obj)
-    if not ((r0.recipe == nil or r0.recipe == "" or r0.recipe == "None") and (tonumber(r0.requested) or 0) == 0) then
-        return false, "replay: station busy (recipe=" .. tostring(r0.recipe) .. ") -- need an idle one", true
+    for _, station in ipairs(candidates) do
+        local r0 = discovery.station_state(station.obj)
+        if is_idle(r0) then
+            local w, werr = overwrite_archive(archive, want)
+            if not w then return false, tostring(werr), true end   -- size mismatch: wait for a fitting craft
+            local fired = pcall(function() station.obj:ChangeRecipe_ServerInternal(pid, archive) end)
+            if not fired then return false, "ChangeRecipe dispatch threw" end
+            local after = discovery.station_state(station.obj)
+            if after.recipe == recipe then
+                return true, string.format("replay: %s x%d @ %s (verified req=%s)", recipe, count, station.baseName, tostring(after.requested))
+            end
+            return false, "replay: dispatched but station shows " .. tostring(after.recipe), true
+        end
     end
-    local w, werr = overwrite_archive(archive, want)
-    if not w then return false, tostring(werr), true end   -- size mismatch: wait for a fitting craft
-    local fired = pcall(function() station.obj:ChangeRecipe_ServerInternal(pid, archive) end)
-    if not fired then return false, "ChangeRecipe dispatch threw" end
-    -- verify the game actually took it (same reason as the native path)
-    local after = discovery.station_state(station.obj)
-    if after.recipe == recipe then
-        return true, string.format("replay: %s x%d @ %s (verified req=%s)", recipe, count, station.baseName, tostring(after.requested))
-    end
-    return false, "replay: dispatched but station shows " .. tostring(after.recipe), true
+    return false, "replay: all matching stations busy -- need an idle one", true
 end
 
 --- Emit every currently-pending order.
@@ -558,6 +546,9 @@ function M.flush(ctx)
             tostring(order.recipe), tostring(order.count),
             placed and "OK" or (soft and "WAIT" or "FAIL"), tostring(detail)))
         if type(M._on_result) == "function" then pcall(M._on_result, order, placed, detail, soft) end
+        -- native dispatches one order at a time; once one is in flight, stop --
+        -- native_tick() submits the next as soon as this one verifies.
+        if M._native_pending then break end
     end
 
     M._flushing = false

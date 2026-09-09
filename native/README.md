@@ -3,12 +3,11 @@
 A C++ DLL that dispatches `ChangeRecipe_ServerInternal` from a game-thread hook,
 so PalCommand can place craft orders without a player having to craft first.
 
-**Current limitation (2026-09-09):** `ChangeRecipe_ServerInternal` validates the
-`RequestPlayerId` against a *connected* `PalPlayerController` and its guild. With
-nobody connected the call is a silent no-op. So the native backend still needs at
-least one player online (AFK is fine — they don't have to craft); orders stay
-queued until then. Full zero-player autonomy is being worked on via a
-disassembly-driven bypass (see `notes/para-codex-03.md`).
+**Needs one player connected.** `ChangeRecipe_ServerInternal` is a silent no-op
+when nobody is online, so the native backend requires **at least one connected
+player** — anyone, AFK, never has to craft. Orders queue until someone connects,
+then flush automatically. (Zero-player autonomy is a separate, later goal; the
+disassembly notes are in `notes/para-codex-03.md` … `para-codex-07.md`.)
 
 Everything else (station discovery, inventory, the order queue, standing rules,
 the cloud/app layer) stays in Lua. This DLL is an optional drop-in: install it and

@@ -246,26 +246,31 @@ function M.stations()
     return out
 end
 
---- Find the station that should fulfil an order for `recipe_id`.
--- Prefers a station on `base_id` (if given) that is currently idle.
-function M.station_for(recipe_id, want_base_id)
+--- Every station that can make `recipe_id`, best-first: preferred base, then
+--- idle, then already-on-this-recipe. `station_key` (if given) forces that exact
+--- machine to the front.
+function M.stations_for(recipe_id, want_base_id, station_key)
     local candidates = {}
     for _, s in ipairs(M.stations()) do
         for _, r in ipairs(s.recipes) do
             if r == recipe_id then candidates[#candidates + 1] = s; break end
         end
     end
-    if #candidates == 0 then return nil end
-
     local function score(s)
         local n = 0
+        if station_key and s.key == station_key then n = n + 1000 end
         if want_base_id and s.baseId == want_base_id then n = n + 100 end
-        if not s.state.workable and s.state.requested == 0 then n = n + 10 end   -- idle
-        if s.state.recipe == recipe_id then n = n + 5 end                        -- already set
+        if not s.state.workable and (tonumber(s.state.requested) or 0) == 0 then n = n + 10 end  -- idle
+        if s.state.recipe == recipe_id then n = n + 5 end                                        -- already set
         return n
     end
     table.sort(candidates, function(l, r) return score(l) > score(r) end)
-    return candidates[1]
+    return candidates
+end
+
+--- Best single station for an order (back-compat wrapper).
+function M.station_for(recipe_id, want_base_id, station_key)
+    return M.stations_for(recipe_id, want_base_id, station_key)[1]
 end
 
 --- Resolve the acting player id (int32 net id) for autonomous / fallback use.

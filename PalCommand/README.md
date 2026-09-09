@@ -23,11 +23,12 @@ Restart the server. Check `data/palcommand.log` for `PalCommand loading`.
 
 | Backend | Requires | Behaviour |
 |---|---|---|
-| **replay** (default, pure Lua) | nothing | Queued orders are placed the next time **any player changes a recipe** at any station. On an active server this happens every session. |
-| **native** (optional) | `PalCommand/dlls/main.dll` (the C++ companion) | Orders are placed on the next scan cycle — no craft needed, but currently **at least one player must be online** (AFK is fine). Orders queue until then. |
+| **native** (default when the DLL is present) | `PalCommand/dlls/main.dll` (the C++ companion) | Places any recipe on any/all production machines across every base. Drains the whole queue order-by-order. Needs **at least one player connected** — anyone, AFK is fine, they never craft anything. Orders queue until someone connects, then flush automatically. |
+| **replay** (pure-Lua fallback) | nothing | Queued orders are placed the next time **any player changes a recipe** at any station. Same-length recipe ids only. |
 
-Both produce identical, legitimate orders. The C++ companion is a drop-in upgrade —
-install the DLL and PalCommand switches to `native` automatically.
+Both produce identical, legitimate orders (real machine, real material cost, a Pal
+does the work). The C++ companion is a drop-in upgrade — install the DLL and
+PalCommand switches to `native` automatically.
 
 ## Data files (`data/`)
 
