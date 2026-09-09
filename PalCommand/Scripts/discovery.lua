@@ -332,4 +332,32 @@ function M.player_id_probe()
     return { id = pick and pick.id or nil, source = pick and pick.source or "none", candidates = cands }
 end
 
+--- RequestPlayerId of a CURRENTLY CONNECTED player only.
+-- ChangeRecipe_ServerInternal resolves the player's guild via the live
+-- PlayerController list; a stale/offline id resolves to a zero guid and the RPC
+-- silently no-ops. So the native backend must use this, never a persisted id.
+-- Returns int32 id or nil (nil => do not arm a native call, keep the order queued).
+function M.connected_player_id()
+    for _, pc in ipairs(util.find_all("PalPlayerController")) do
+        if valid(pc) and not_default(pc) then
+            -- a live controller must have a possessed pawn OR an active net connection
+            local has_pawn = ok(function() return pc:GetPawn() end) ~= nil
+                or ok(function() return pc.Pawn end) ~= nil
+            local has_conn = ok(function() return pc.NetConnection end) ~= nil
+                or ok(function() return pc:GetNetConnection() end) ~= nil
+            if has_pawn or has_conn then
+                local ps = ok(function() return pc.PlayerState end)
+                    or ok(function() return pc:GetPlayerState() end)
+                if ps and valid(ps) then
+                    local pid = ok(function() return ps:GetPlayerId() end)
+                    if pid == nil then pid = ok(function() return ps.PlayerId end) end
+                    local n = tonumber(pid)
+                    if n and n ~= 0 then return math.floor(n) end
+                end
+            end
+        end
+    end
+    return nil
+end
+
 return M

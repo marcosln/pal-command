@@ -7,7 +7,13 @@
 --               station address, the ChangeRecipe UFunction address, the param
 --               offsets (from live reflection) and the recipe bytes via
 --               data/native-request.ini, then poke a trigger so it dispatches
---               ChangeRecipe_ServerInternal on the game thread. No player needed.
+--               ChangeRecipe_ServerInternal on the game thread.
+--               LIMITATION (2026-09-09): ChangeRecipe_ServerInternal validates the
+--               RequestPlayerId against a *connected* PalPlayerController and its
+--               guild. With nobody connected it is a silent no-op. So the native
+--               backend currently needs at least one player online (AFK is fine --
+--               they do not have to craft). Orders stay queued until then. Full
+--               zero-player autonomy is pending a disasm-driven bypass.
 --
 --   replay   -- pure Lua. A persistent POST hook on ChangeRecipe_ServerInternal:
 --               whenever a player changes a recipe we borrow that live
@@ -212,7 +218,12 @@ local function native_submit(station_obj, pid, want, order)
             tostring(L.parms_reflected), tostring(L.max_end), tostring(pid)))
     end
 
-    M._native_pending = { rid = rid, station = station_obj, order = order, at = os.time(), pokes = 0 }
+    M._native_pending = {
+        rid = rid, station = station_obj, order = order, at = os.time(), pokes = 0,
+        expect_recipe = order.recipe,
+        expect_count = math.max(1, math.floor(tonumber(order.count) or 1)),
+        before = discovery.station_state(station_obj),   -- snapshot to verify against
+    }
     poke_trigger(station_obj)
     return true
 end
@@ -234,12 +245,33 @@ function M.native_tick()
         local status = raw:match("status%s*=%s*([%w%-]+)")
         local detail = raw:match("detail%s*=%s*([^\r\n]*)")
         if status == "called" then
+            -- `called` only means ProcessEvent returned. Verify the game actually
+            -- applied the recipe -- with an offline/rejected player it is a silent
+            -- no-op and we must NOT drop the order.
             M._native_pending = nil
-            M._stats.placed = M._stats.placed + 1
-            util.log(string.format("native: %s x%s placed after %d pokes (%s)",
-                tostring(pend.order.recipe), tostring(pend.order.count), pend.pokes, tostring(detail)))
-            if type(M._on_result) == "function" then
-                pcall(M._on_result, pend.order, true, "native: " .. tostring(detail), false)
+            local now = valid(pend.station) and discovery.station_state(pend.station) or {}
+            local before = pend.before or {}
+            local recipe_ok = now.recipe == pend.expect_recipe
+            local amount_ok = (tonumber(now.requested) or 0) >= pend.expect_count
+                or (tonumber(now.remaining) or 0) >= pend.expect_count
+                or (tonumber(now.requested) or 0) > (tonumber(before.requested) or 0)
+            if recipe_ok and (amount_ok or now.workable) then
+                M._stats.placed = M._stats.placed + 1
+                util.log(string.format("native: %s x%s VERIFIED after %d pokes (recipe=%s req=%s workable=%s)",
+                    tostring(pend.expect_recipe), tostring(pend.expect_count), pend.pokes,
+                    tostring(now.recipe), tostring(now.requested), tostring(now.workable)))
+                if type(M._on_result) == "function" then
+                    pcall(M._on_result, pend.order, true,
+                        string.format("native: verified %s req=%s", tostring(now.recipe), tostring(now.requested)), false)
+                end
+            else
+                M._stats.lastError = string.format(
+                    "native: ProcessEvent returned but station unchanged (recipe=%s want=%s) -- waiting-for-connected-player",
+                    tostring(now.recipe), tostring(pend.expect_recipe))
+                util.log(M._stats.lastError)
+                if type(M._on_result) == "function" then
+                    pcall(M._on_result, pend.order, false, M._stats.lastError, true)   -- SOFT: keep the order
+                end
             end
             return
         elseif status and status ~= "call-armed" then
@@ -302,20 +334,6 @@ function M.backend()
     return "replay"
 end
 
---- Best RequestPlayerId for an autonomous order: a pid seen this session, then a
---- persisted one, then a live probe. nil if nothing found (caller falls back to 0).
-function M.acting_pid()
-    if M._last_real_pid and M._last_real_pid ~= 0 then return M._last_real_pid end
-    if M._cfg.data_dir then
-        local raw = util.read_file(M._cfg.data_dir .. "\\last-pid.txt")
-        local n = raw and tonumber((raw:gsub("%s", "")))
-        if n and n ~= 0 then M._last_real_pid = math.floor(n); return M._last_real_pid end
-    end
-    local probed = discovery.any_player_id()
-    if probed and probed ~= 0 then return probed end
-    return nil
-end
-
 --- @param order { recipe, count, transport, baseId? }
 --- @param ctx   { pid, archive? }
 --- @return placed:boolean, detail:string, soft:boolean  (soft = not placed but not a real failure -- keep waiting)
@@ -331,24 +349,30 @@ function M.place(order, ctx)
     end
 
     local want = bytes.build(recipe, count, transport)
-    -- note: 0 is truthy in Lua, so treat a 0/absent ctx pid as "resolve one"
-    local pid = ctx and ctx.pid
-    if not pid or pid == 0 then pid = M.acting_pid() end
-    pid = pid or 0
 
     if M.native_ready() then
         if M._native_pending then
             -- one native order in flight; M.native_tick() will clear it
-            return false, "native: bridge busy with " .. tostring(M._native_pending.order and M._native_pending.order.recipe), true
+            return false, "native: busy with " .. tostring(M._native_pending.expect_recipe), true
         end
-        local okk, serr = native_submit(station.obj, pid, want, order)
+        -- ChangeRecipe_ServerInternal needs a CURRENTLY CONNECTED player's id (it
+        -- resolves their guild via the live PlayerController; an offline id -> zero
+        -- guid -> silent no-op). No connected player => keep the order queued.
+        local cpid = discovery.connected_player_id()
+        if not cpid then
+            return false, "native: no connected player -- order queued (needs a player online)", true
+        end
+        local okk, serr = native_submit(station.obj, cpid, want, order)
         if okk then
-            return false, string.format("native: submitted %s x%d @ %s (awaiting game thread)", recipe, count, station.baseName), true
+            return false, string.format("native: submitted %s x%d @ %s pid=%d (verifying)", recipe, count, station.baseName, cpid), true
         end
         if not (ctx and ctx.archive) then return false, "native: " .. tostring(serr) end
         util.log("native submit failed (" .. tostring(serr) .. "); trying replay")
     end
 
+    -- replay: rewrite a live archive from a player's craft and re-dispatch it. The
+    -- pid here is that player's real (connected) RequestPlayerId, so it is valid.
+    local pid = (ctx and ctx.pid) or 0
     local archive = ctx and ctx.archive
     if archive == nil then
         return false, "replay backend needs a live archive (waiting for a player craft)", true
@@ -357,7 +381,12 @@ function M.place(order, ctx)
     if not w then return false, tostring(werr), true end   -- size mismatch: wait for a fitting craft
     local fired = pcall(function() station.obj:ChangeRecipe_ServerInternal(pid, archive) end)
     if not fired then return false, "ChangeRecipe dispatch threw" end
-    return true, string.format("replay: %s x%d @ %s", recipe, count, station.baseName)
+    -- verify the game actually took it (same reason as the native path)
+    local after = discovery.station_state(station.obj)
+    if after.recipe == recipe then
+        return true, string.format("replay: %s x%d @ %s (verified req=%s)", recipe, count, station.baseName, tostring(after.requested))
+    end
+    return false, "replay: dispatched but station shows " .. tostring(after.recipe), true
 end
 
 --- Emit every currently-pending order.
@@ -402,14 +431,7 @@ function M.install_hook()
             function(self, a, b)
                 if M._flushing then return end
                 pcall(function()
-                    local pid = a:get()
-                    -- remember a real RequestPlayerId for autonomous (native) orders
-                    if pid and tonumber(pid) and tonumber(pid) ~= 0 then
-                        M._last_real_pid = math.floor(tonumber(pid))
-                        if M._cfg.data_dir then
-                            pcall(function() util.write_file(M._cfg.data_dir .. "\\last-pid.txt", tostring(M._last_real_pid)) end)
-                        end
-                    end
+                    local pid = a:get()   -- a real, connected RequestPlayerId (this craft)
                     local archive = b:get()
                     if archive == nil or archive.Bytes == nil then return end
                     local original = snapshot_archive(archive)
@@ -431,10 +453,11 @@ function M.stats()
     s.nativeStatus = M.native_status()
     s.nativeDiag = M.native_diag()
     s.nativePending = M._native_pending and {
-        recipe = M._native_pending.order and M._native_pending.order.recipe,
+        recipe = M._native_pending.expect_recipe, count = M._native_pending.expect_count,
         rid = M._native_pending.rid, pokes = M._native_pending.pokes,
         age = os.time() - M._native_pending.at,
     } or nil
+    s.connectedPid = discovery.connected_player_id()
     s.layout = M._layout
     return s
 end

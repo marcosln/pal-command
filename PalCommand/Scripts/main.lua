@@ -255,8 +255,10 @@ local function scan_cycle(reason, light)
         ingest_orders()
         apply_rules(totals, stations)
 
-        if engine.backend() == "native" and #S.queue > 0 then
-            engine.flush({ pid = discovery.any_player_id() })   -- nil -> engine resolves via acting_pid()
+        -- native orders need a connected player; flush only then (replay flushes
+        -- itself from the craft hook). Orders otherwise just wait in the queue.
+        if engine.backend() == "native" and #S.queue > 0 and discovery.connected_player_id() then
+            engine.flush({})
         end
 
         S.lastScan = os.date("!%Y-%m-%dT%H:%M:%SZ")

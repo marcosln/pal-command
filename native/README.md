@@ -1,9 +1,14 @@
 # PalCommand native bridge
 
-A ~450-line C++ DLL that does the **one** thing UE4SS's Lua layer cannot
-([issue #378](https://github.com/UE4SS-RE/RE-UE4SS/issues/378)): construct an
-`FPalNetArchive` parameter and dispatch `ChangeRecipe_ServerInternal` with it —
-so PalCommand can place craft orders with **no player online**.
+A C++ DLL that dispatches `ChangeRecipe_ServerInternal` from a game-thread hook,
+so PalCommand can place craft orders without a player having to craft first.
+
+**Current limitation (2026-09-09):** `ChangeRecipe_ServerInternal` validates the
+`RequestPlayerId` against a *connected* `PalPlayerController` and its guild. With
+nobody connected the call is a silent no-op. So the native backend still needs at
+least one player online (AFK is fine — they don't have to craft); orders stay
+queued until then. Full zero-player autonomy is being worked on via a
+disassembly-driven bypass (see `notes/para-codex-03.md`).
 
 Everything else (station discovery, inventory, the order queue, standing rules,
 the cloud/app layer) stays in Lua. This DLL is an optional drop-in: install it and
@@ -11,15 +16,19 @@ the cloud/app layer) stays in Lua. This DLL is an optional drop-in: install it a
 
 ## Why this is safe
 
-* **No RE-UE4SS source, no UEPseudo, no Epic account.** It resolves the 5 UE4SS
-  exports it needs by mangled name via `GetProcAddress` from the already-loaded
-  `UE4SS.dll`. (Symbol names verified against the server's exact build,
-  `ba2efd55`.)
+* **No RE-UE4SS source, no UEPseudo, no Epic account.** It resolves the 3 UE4SS
+  exports it needs (`ProcessEvent`, `RegisterPreHook`, `UnregisterHook`) by
+  mangled name via `GetProcAddress` from the already-loaded `UE4SS.dll`. (Verified
+  against the server's build, `ba2efd55`; `CppUserModBase` ctor/dtor are resolved
+  too as a sanity check but are optional.)
 * **Built with MSVC** so `std::function` is ABI-identical to UE4SS's — no faked
   STL layout.
-* **Self-disabling.** If the loaded `UE4SS.dll` path doesn't contain the SHA it
-  was built for, or any symbol is missing, `start_mod` returns `nullptr` and the
-  bridge does nothing (`data/native-status.ini` says `disabled`).
+* **Fails closed on a bad build.** If those exports don't resolve, `start_mod`
+  writes `data/native-status.ini` `state=disabled` and does nothing. The build SHA
+  is **advisory only** — it is reported in the status file (`sha-path:match` /
+  `unverified`) but does not gate execution. `start_mod` pins the DLL and returns
+  `nullptr` (it is not a real `CppUserModBase`); the worker thread + on-demand
+  pre-hook do all the work.
 * **Reads, never frees.** `ProcessEvent` deep-copies the parameter block into its
   own frame (`CopyCompleteValue`) and destroys only that copy, so pointing the
   archive's array header at a local buffer is safe.
