@@ -343,6 +343,33 @@ static void handle_request() {
     char op[16] = {0};
     if (!ini_str(L"operation", op, sizeof(op))) { write_response(rid, "error", "operation-missing"); return; }
 
+    // "dump" -- read up to 8 KiB from an address, write it as hex. Pure inspection,
+    // no game thread, no trigger. Used to disassemble ChangeRecipe_ServerInternal.
+    if (strcmp(op, "dump") == 0) {
+        void* addr = (void*)(uintptr_t)ini_u64(L"dump_addr", 16, &ok);
+        uint32_t len = ok ? (uint32_t)ini_u64(L"dump_len", 10, &ok) : 0;
+        if (!addr || !ok || len == 0 || len > 8192) { write_response(rid, "error", "dump-args"); return; }
+        if (!readable(addr, len)) { write_response(rid, "error", "dump-unreadable"); return; }
+        static uint8_t snap[8192];
+        bool copied = false;
+        __try { memcpy(snap, addr, len); copied = true; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (!copied) { write_response(rid, "error", "dump-copy-faulted"); return; }
+        // hex into a big buffer written next to the response
+        static char hexbuf[8192 * 2 + 256];
+        int n = _snprintf_s(hexbuf, _TRUNCATE, "[dump]\nrequest_id=%llu\naddr=%llX\nlen=%u\nexe_base=%llX\nue4ss_base=%llX\nhex=",
+                            (unsigned long long)rid, (unsigned long long)(uintptr_t)addr, len,
+                            (unsigned long long)(uintptr_t)GetModuleHandleW(nullptr),
+                            (unsigned long long)(uintptr_t)g_ue4ss);
+        for (uint32_t i = 0; i < len && n < (int)sizeof(hexbuf) - 4; ++i)
+            n += _snprintf_s(hexbuf + n, sizeof(hexbuf) - n, _TRUNCATE, "%02X", snap[i]);
+        _snprintf_s(hexbuf + n, sizeof(hexbuf) - n, _TRUNCATE, "\n");
+        wchar_t dump_path[MAX_PATH * 2];
+        _snwprintf_s(dump_path, _TRUNCATE, L"%ls\\data\\native-dump.ini", g_root);
+        write_atomic(dump_path, hexbuf);
+        write_response(rid, "dumped", "ok");
+        return;
+    }
+
     void* trigger = (void*)(uintptr_t)ini_u64(L"trigger_function", 16, &ok);
     if (!ok || !trigger) { write_response(rid, "error", "trigger-missing"); return; }
 
