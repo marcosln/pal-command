@@ -215,8 +215,60 @@ local function station_base(st)
 end
 M.station_base = station_base
 
+--- Per-machine identity + world position. Palworld regenerates the UObject each
+--- restart, but a map object carries a persistent id in the save. Probe several
+--- accessors; keep whatever the build exposes.
+local function station_identity(st)
+    local id = {}
+
+    -- persistent map-object id (survives restarts)
+    local function guid_str(g)
+        if g == nil then return nil end
+        local a = ok(function() return tonumber(g.A) end)
+        local b = ok(function() return tonumber(g.B) end)
+        local c = ok(function() return tonumber(g.C) end)
+        local d = ok(function() return tonumber(g.D) end)
+        if a and b and c and d then
+            return string.format("%08x%08x%08x%08x", a & 0xffffffff, b & 0xffffffff, c & 0xffffffff, d & 0xffffffff)
+        end
+        local s = fstr(g)
+        return (s ~= "" and s) or nil
+    end
+    id.mapId = guid_str(ok(function() return st:GetConcreteModelInstanceId() end))
+           or guid_str(ok(function() return st.MapObjectInstanceId end))
+           or guid_str(ok(function() return st.InstanceId end))
+           or fstr(ok(function() return st:GetMapObjectId() end))
+           or fstr(ok(function() return st.MapObjectId end))
+           or fstr(ok(function() return st.MapObjectIdCache end))
+
+    -- machine type / define id
+    id.machineType = fstr(ok(function() return st.AssignDefineDataId end))
+                 or fstr(ok(function() return st:GetMapObjectId() end))
+                 or fstr(ok(function() return st.ConvertItemDataId end))
+
+    -- world position -> for a map view. Try the model, then any owning actor.
+    local function xyz(v)
+        if v == nil then return nil end
+        local x = ok(function() return tonumber(v.X) end)
+        local y = ok(function() return tonumber(v.Y) end)
+        local z = ok(function() return tonumber(v.Z) end)
+        if x and y then return { x = x, y = y, z = z or 0 } end
+        return nil
+    end
+    id.pos = xyz(ok(function() return st:GetWorldLocation() end))
+          or xyz(ok(function() return st:K2_GetActorLocation() end))
+          or xyz(ok(function() return st:GetComponentLocation() end))
+          or xyz(ok(function()
+                local t = st:GetConcreteModelTransform()
+                return t and t.Translation
+             end))
+          or xyz(ok(function() return st.WorldTransformCache and st.WorldTransformCache.Translation end))
+    return id
+end
+M.station_identity = station_identity
+
 --- All production stations, annotated.
--- @return list of { obj, name, baseId, baseName, recipes=[id], state={...}, key }
+-- @return list of { obj, name, baseId, baseName, recipes=[id], state={...}, key, mapId?, pos?, machineType?, index }
 function M.stations()
     local base_names = {}
     for i, b in ipairs(M.bases()) do base_names[base_id(b)] = base_name(b, i) end
@@ -230,6 +282,7 @@ function M.stations()
                 local bid = base and base_id(base) or "unknown"
                 local sorted = { table.unpack(recipes) }
                 table.sort(sorted)
+                local ident = station_identity(st)
                 out[#out + 1] = {
                     obj = st,
                     name = util.short_name(st),
@@ -239,17 +292,32 @@ function M.stations()
                     state = M.station_state(st),
                     -- stable across restarts: base + its recipe set (object ids regenerate)
                     key = bid .. "|" .. table.concat(sorted, ","),
+                    mapId = ident.mapId,
+                    pos = ident.pos,
+                    machineType = ident.machineType,
                 }
             end
         end
+    end
+    -- stable per-machine ordinal within a (key) group: sort identical machines by
+    -- mapId, else by position, else leave enumeration order.
+    local groups = {}
+    for _, s in ipairs(out) do groups[s.key] = groups[s.key] or {}; table.insert(groups[s.key], s) end
+    for _, g in pairs(groups) do
+        table.sort(g, function(l, r)
+            local lk = l.mapId or (l.pos and string.format("%d,%d", l.pos.x, l.pos.y)) or ""
+            local rk = r.mapId or (r.pos and string.format("%d,%d", r.pos.x, r.pos.y)) or ""
+            return lk < rk
+        end)
+        for i, s in ipairs(g) do s.index = i end
     end
     return out
 end
 
 --- Every station that can make `recipe_id`, best-first: preferred base, then
---- idle, then already-on-this-recipe. `station_key` (if given) forces that exact
---- machine to the front.
-function M.stations_for(recipe_id, want_base_id, station_key)
+--- idle, then already-on-this-recipe. `target` (if given) pins one machine --
+--- matched against its mapId, its "key#index", or its key.
+function M.stations_for(recipe_id, want_base_id, target)
     local candidates = {}
     for _, s in ipairs(M.stations()) do
         for _, r in ipairs(s.recipes) do
@@ -258,7 +326,8 @@ function M.stations_for(recipe_id, want_base_id, station_key)
     end
     local function score(s)
         local n = 0
-        if station_key and s.key == station_key then n = n + 1000 end
+        if target and (s.mapId == target or s.key == target
+                       or (s.key .. "#" .. tostring(s.index)) == target) then n = n + 1000 end
         if want_base_id and s.baseId == want_base_id then n = n + 100 end
         if not s.state.workable and (tonumber(s.state.requested) or 0) == 0 then n = n + 10 end  -- idle
         if s.state.recipe == recipe_id then n = n + 5 end                                        -- already set

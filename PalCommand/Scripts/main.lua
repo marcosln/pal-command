@@ -216,11 +216,10 @@ local function write_stations(list)
     list = list or discovery.stations()
     local rows = {}
     for _, s in ipairs(list) do
-        local a = util.ok(function() return s.obj:GetAddress() end)
         rows[#rows + 1] = {
             key = s.key, name = s.name, baseId = s.baseId, baseName = s.baseName,
             recipes = s.recipes, state = s.state,
-            addr = a and string.format("%X", a) or nil,   -- diagnostic (for the r12b inspect op)
+            mapId = s.mapId, pos = s.pos, machineType = s.machineType, index = s.index,
         }
     end
     util.write_file(PATHS.stations, json.encode({

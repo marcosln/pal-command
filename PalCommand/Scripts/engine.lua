@@ -454,7 +454,7 @@ function M.place(order, ctx)
     if transport == nil then transport = true end
 
     local candidates = {}
-    for _, s in ipairs(discovery.stations_for(recipe, order.baseId, order.stationKey)) do
+    for _, s in ipairs(discovery.stations_for(recipe, order.baseId, order.target or order.stationKey)) do
         if valid(s.obj) then candidates[#candidates + 1] = s end
     end
     if #candidates == 0 then
