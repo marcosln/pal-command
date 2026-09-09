@@ -1,7 +1,7 @@
 -- PalCommand :: json.lua
 -- Minimal JSON encode/decode. Pure Lua 5.4, no dependencies.
--- Encoder derived from the approach used by PalworldMobileBridge (known-good on this
--- server), extended with a tolerant recursive-descent decoder for orders/rules input.
+-- Standard compact serializer; the decoder is a tolerant recursive-descent parser
+-- for the orders/rules the app writes.
 
 local M = {}
 

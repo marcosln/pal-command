@@ -119,16 +119,14 @@ guideline 4.2 ("not just a web view"). Name already avoids the Palworld trademar
 - [ ] 5.2 Mod packaging + install README for strangers
 - [ ] 5.3 Publish mod (Nexus)
 - [ ] 5.4 Capacitor wrap → TestFlight → App Store submission (needs the Apple Developer account)
-- [ ] 5.5 **LICENSE + tidy comments before publishing.** Repo has no LICENSE (pick MIT).
-      "PalworldMobileBridge" in `json.lua` / `discovery.lua` = Codex's own earlier
-      working name for THIS project (per user 2026-09-09), not a third party →
-      **no external attribution owed.** Just reword those comments (they point to
-      nothing a reader can find and imply an external dep that doesn't exist);
-      the storage-reflection path + minimal JSON encoder are the obvious
-      implementations, not copyrightable expression. PBA ("Palworld Base
-      Automation", Nexus mod 3691) is prior art for the *idea* only — no PBA code
-      in our mod (grep clean); a "an alternative to PBA" nod in the README is
-      nice-to-have, not required.
+- [x] 5.5 LICENSE + tidy comments <!-- done 2026-09-09 (commit next): MIT LICENSE at
+      repo root (Copyright 2026 marcosln). "PalworldMobileBridge" was Codex's own
+      earlier working name for THIS project (per user), not a third party -> no
+      external attribution owed; reworded the comments in json.lua / discovery.lua /
+      main.lua ("standard storage-reflection sequence", "standard compact serializer").
+      README: dropped "PBA" from the disclaimer, added a factual "an alternative to a
+      client-side automation UI (e.g. PBA)" line + a License section. No PBA code in
+      the mod (grep clean). -->
 
 ## DEFERRED — Zero-player autonomy
 

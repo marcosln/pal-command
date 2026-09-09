@@ -5,7 +5,11 @@ dedicated server. Publishes the whole-server storage inventory and lets you plac
 **legitimate** craft orders (real recipe, real material cost, a Pal does the work)
 from your phone — including standing "keep topped up" rules.
 
-It does **not** touch player inventories, world saves, or PBA/other mods.
+It does **not** touch player inventories, world saves, or other server mods.
+
+An alternative to a client-side automation UI (e.g. PBA) for setups where a
+`.pak` LogicMod isn't an option — crossplay servers where console players can't
+load client mods, or driving crafting entirely from a phone.
 
 ## Install
 
@@ -92,3 +96,7 @@ re-queued or retried.
 
 See the file — scan interval, per-flush cap, guild chest toggle, retry cap, and
 optional Cloudflare Worker URL/token for cloud sync.
+
+## License
+
+MIT — see [`LICENSE`](../LICENSE) at the repo root.

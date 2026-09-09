@@ -6,7 +6,7 @@
 --   * places legitimate orders (real recipe, real material cost, a Pal does the work)
 --
 -- Transport is file-based (data/*.json, fetched/pushed via the host's file API or a
--- Cloudflare Worker). No player inventory, saves, or PBA state is touched.
+-- Cloudflare Worker). No player inventory, world saves, or other mods' state is touched.
 
 local util = require("util")
 local json = require("json")

@@ -3,8 +3,9 @@
 --   * whole-server storage inventory (all base chests + guild chest)
 --   * production stations (PalMapObjectConvertItemModel: crushers, furnaces, ...)
 --
--- The inventory path mirrors PalworldMobileBridge, which is known-good on this
--- server. Nothing here mutates game state.
+-- The inventory path is the standard Palworld storage-reflection sequence
+-- (base camp module -> container manager -> per-slot item ids). Read-only:
+-- nothing here mutates game state.
 
 local util = require("util")
 local ok, valid, fstr = util.ok, util.valid, util.fstr
