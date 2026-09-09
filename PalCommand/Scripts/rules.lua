@@ -74,6 +74,7 @@ function M.normalize_order(raw)
         count = math.min(count, 100000),
         transport = raw.transport ~= false,
         baseId = raw.baseId,
+        target = raw.target or raw.stationKey or raw.mapId,   -- pin one machine (mapId / key#index / key)
         createdAt = raw.createdAt or os.date("!%Y-%m-%dT%H:%M:%SZ"),
     }
 end
