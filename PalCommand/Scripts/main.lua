@@ -105,8 +105,10 @@ end
 
 --- Cancel by selector: an order id, a recipe id, a target mapId, or "all"/true.
 -- Drops matching pending orders from the queue, aborts a matching in-flight native
--- submit, and clears the recipe on any machine we set for a match (never a machine
--- a player set -- we only touch engine._placed_watch entries). Returns {queued, placed}.
+-- submit, and clears the recipe on matching machines. Safety: "all" / by-recipe /
+-- by-id only ever touch recipes WE set (engine._placed_watch), never a player's.
+-- An explicit mapId is a deliberate "clear this one machine" -- honoured even if
+-- it isn't in our ledger (e.g. after a restart). Returns {queued, placed}.
 local function cancel_orders(sel)
     if sel == true then sel = "all" end
     sel = tostring(sel or "all")
@@ -132,20 +134,36 @@ local function cancel_orders(sel)
         res.queued = res.queued + 1
     end
 
+    local cleared = {}   -- station objs already cleared this call
     for i = #(engine._placed_watch or {}), 1, -1 do
         local w = engine._placed_watch[i]
         local m = all or w.recipe == sel or w.target == sel
         if not m and is_mapid then
-            local id = engine and discovery.station_identity and discovery.station_identity(w.station)
+            local id = discovery.station_identity and discovery.station_identity(w.station)
             m = id and id.mapId == sel
         end
         if m then
             local okc, how = engine.cancel_station(w.station)
+            cleared[tostring(w.station)] = true
             push_recent({ recipe = w.recipe, count = w.count,
                 result = okc and "cancelled" or "cancel-failed", detail = tostring(how) })
             util.log(string.format("cancel %s @ %s -> %s (%s)", tostring(w.recipe), tostring(w.target), tostring(okc), tostring(how)))
             table.remove(engine._placed_watch, i)
             if okc then res.placed = res.placed + 1 end
+        end
+    end
+
+    -- explicit mapId not in our ledger: clear that one machine directly
+    if is_mapid and res.placed == 0 then
+        for _, s in ipairs(discovery.stations()) do
+            if s.mapId == sel and not cleared[tostring(s.obj)]
+               and s.state.recipe and s.state.recipe ~= "None" and s.state.recipe ~= "" then
+                local okc, how = engine.cancel_station(s.obj)
+                push_recent({ recipe = s.state.recipe, count = s.state.requested,
+                    result = okc and "cancelled" or "cancel-failed", detail = "explicit mapId: " .. tostring(how) })
+                util.log(string.format("cancel (explicit mapId) %s @ %s -> %s (%s)", tostring(s.state.recipe), sel, tostring(okc), tostring(how)))
+                if okc then res.placed = res.placed + 1 end
+            end
         end
     end
 

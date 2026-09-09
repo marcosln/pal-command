@@ -594,13 +594,15 @@ end
 
 --- Track native orders whose recipe we set. Two jobs:
 ---  1. the ledger of "recipes WE set" -> M.cancel() only ever touches our own.
----  2. a soft, informational `stalled` flag: the recipe is placed and legit but no
----     Pal is working it yet (no power / no kindling Pal / no fuel). This is NOT a
----     failure -- the game produces it once the base can -- so we never re-queue,
----     never retry; we just note it once (log + state.json) so the app can show it.
---- `workable` right at placement is flaky (furnaces report false for a beat), so we
---- judge over time: became workable, or `remaining` dropped below the request.
---- Entries drop when the recipe leaves the machine (completed / cancelled). Pure reads.
+---  2. a soft, informational `stalled` flag: the recipe is placed and legit but
+---     nothing is actually being produced (no power / no kindling Pal / no fuel /
+---     no free work slot). This is NOT a failure -- the game produces it once the
+---     base can -- so we never re-queue, never retry; we note it once (log +
+---     state.json) so the app can show a soft "waiting on the base" badge.
+--- The real "it's producing" signal is `remaining` dropping below the request.
+--- `workable` alone isn't enough (a furnace can be workable with no Pal assigned),
+--- so it only delays the stalled call, it doesn't clear it. Entries drop when the
+--- recipe leaves the machine (completed / cancelled). Pure reads.
 function M.sweep_placed_watch()
     if #M._placed_watch == 0 then return end
     local t = os.time()
@@ -613,15 +615,17 @@ function M.sweep_placed_watch()
             if st.workable == true then w.ever_workable = true end
             local rem = tonumber(st.remaining)
             if rem and rem > 0 and rem < (w.count or math.huge) then w.progressed = true end
-            local working = w.ever_workable or w.progressed
             local age = t - w.at
-            if not working and age > 90 and not w.stalled then
+            -- producing = remaining is going down. give a workable-but-not-yet-moving
+            -- station longer (a Pal may still be walking over) before calling it stalled.
+            local grace = w.ever_workable and 180 or 90
+            if w.progressed then
+                w.stalled = false
+            elseif age > grace and not w.stalled then
                 w.stalled = true
                 util.log(string.format(
-                    "note: %s x%s @ %s placed, not producing yet (no power / kindling Pal / fuel) -- the base will craft it when it can",
+                    "note: %s x%s @ %s placed but not producing (no power / kindling Pal / fuel / free work slot) -- the base will craft it when it can",
                     tostring(w.recipe), tostring(w.count), tostring(w.target or "?")))
-            elseif working and w.stalled then
-                w.stalled = false   -- it got going on its own
             end
         end
     end
@@ -690,8 +694,9 @@ function M.stats()
     for _, w in ipairs(M._placed_watch) do
         s.placedWatch[#s.placedWatch + 1] = {
             recipe = w.recipe, count = w.count, target = w.target, age = os.time() - w.at,
-            working = (w.ever_workable or w.progressed) or false,
-            stalled = w.stalled or false,   -- placed but not producing yet (no power / Pal / fuel)
+            producing = w.progressed or false,        -- remaining is going down
+            workable = w.ever_workable or false,      -- game says it can be worked
+            stalled = w.stalled or false,             -- placed, not producing (no power / Pal / fuel / slot)
         }
     end
     return s
