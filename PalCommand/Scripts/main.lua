@@ -255,7 +255,7 @@ local function scan_cycle(reason, light)
         apply_rules(totals, stations)
 
         if engine.backend() == "native" and #S.queue > 0 then
-            engine.flush({ pid = discovery.any_player_id() or 0 })
+            engine.flush({ pid = discovery.any_player_id() })   -- nil -> engine resolves via acting_pid()
         end
 
         S.lastScan = os.date("!%Y-%m-%dT%H:%M:%SZ")

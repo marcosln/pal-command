@@ -331,7 +331,10 @@ function M.place(order, ctx)
     end
 
     local want = bytes.build(recipe, count, transport)
-    local pid = (ctx and ctx.pid) or M.acting_pid() or 0
+    -- note: 0 is truthy in Lua, so treat a 0/absent ctx pid as "resolve one"
+    local pid = ctx and ctx.pid
+    if not pid or pid == 0 then pid = M.acting_pid() end
+    pid = pid or 0
 
     if M.native_ready() then
         if M._native_pending then
