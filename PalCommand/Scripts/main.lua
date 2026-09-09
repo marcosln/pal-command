@@ -357,20 +357,27 @@ local function boot()
         end)
     end
 
-    -- one-shot diagnostics for the no-player-entry hunt: dump the convert-model
-    -- UFunction API, and ask the bridge to walk the r12b chain for one station.
+    -- one-shot diagnostics for the no-player-entry hunt (each guarded, on the game thread)
     if type(ExecuteWithDelay) == "function" then
-        ExecuteWithDelay(22000, function()
+        ExecuteWithDelay(20000, function()
             local function go()
-                local api = pcall(discovery.dump_convert_api) and discovery.dump_convert_api() or {}
-                util.write_file(ROOT .. "\\data\\convert-api.json", json.encode(api))
-                util.log("convert-api dumped: " .. #api .. " functions")
-                if engine.native_ready and engine.native_ready() and engine.request_inspect then
-                    local st = discovery.station_for("Pal_crystal_S")
-                    if st and st.obj then
-                        local okk, err = engine.request_inspect(st.obj)
-                        util.log("r12b inspect: " .. tostring(okk) .. " " .. tostring(err))
-                    end
+                local okk, api = pcall(discovery.dump_convert_api)
+                if okk then
+                    util.write_file(ROOT .. "\\data\\convert-api.json", json.encode(api))
+                    util.log("convert-api dumped: " .. #api .. " entries")
+                else
+                    util.log("convert-api dump failed: " .. tostring(api))
+                end
+            end
+            if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
+        end)
+        ExecuteWithDelay(28000, function()
+            local function go()
+                if not (engine.native_ready and engine.native_ready() and engine.request_inspect) then return end
+                local st = discovery.station_for("Pal_crystal_S")
+                if st and st.obj then
+                    local okk, err = engine.request_inspect(st.obj)
+                    util.log("r12b inspect: " .. tostring(okk) .. " " .. tostring(err))
                 end
             end
             if ExecuteInGameThread then ExecuteInGameThread(go) else go() end

@@ -332,25 +332,28 @@ function M.player_id_probe()
     return { id = pick and pick.id or nil, source = pick and pick.source or "none", candidates = cands }
 end
 
---- Every UFunction whose outer is PalMapObjectConvertItemModel or a superclass.
--- Used to hunt for a no-player recipe/work entry (Load/PostLoad/OnRep/Restore/...).
+--- UFunctions declared on PalMapObjectConvertItemModel + its superclasses.
+-- Hunt for a no-player recipe/work entry (Load/PostLoad/OnRep/Restore/...).
+-- Walks each UClass's own function list -- NO full-object iteration.
 function M.dump_convert_api()
-    local wanted = {
-        PalMapObjectConvertItemModel = true, PalMapObjectDeployItemModel = true,
-        PalMapObjectModel = true, PalMapObjectConcreteModelBase = true,
-        PalMapObjectModelBase = true, PalWorkableBase = true, PalWorkBase = true,
-        PalMapObjectItemStorageModel = true, Object = false,
+    local classes = {
+        "PalMapObjectConvertItemModel", "PalMapObjectDeployItemModel",
+        "PalMapObjectConcreteModelBase", "PalMapObjectModelBase",
+        "PalWorkableBase", "PalWorkBase", "PalMapObjectItemStorageModel",
+        "PalMapObjectModel",
     }
     local seen, out = {}, {}
-    local list = util.find_all("Function")
-    if #list == 0 then list = util.find_all("Struct") end
-    for _, fn in ipairs(list) do
-        local outer = ok(function() return fn:GetOuter() end)
-        local on = outer and fstr(ok(function() return outer:GetName() end)) or ""
-        if wanted[on] then
-            local n = fstr(ok(function() return fn:GetFName() end))
-            local key = on .. ":" .. n
-            if n ~= "" and not seen[key] then seen[key] = true; out[#out + 1] = key end
+    for _, cn in ipairs(classes) do
+        local cls = ok(function() return StaticFindObject("/Script/Pal." .. cn) end)
+        if cls and valid(cls) then
+            local walked = pcall(function()
+                cls:ForEachFunction(function(fn)
+                    local n = fstr(ok(function() return fn:GetFName() end))
+                    local k = cn .. ":" .. n
+                    if n ~= "" and not seen[k] then seen[k] = true; out[#out + 1] = k end
+                end)
+            end)
+            if not walked then out[#out + 1] = cn .. ":<ForEachFunction unavailable>" end
         end
     end
     table.sort(out)
