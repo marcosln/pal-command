@@ -46,6 +46,7 @@ local CFG = {
     max_attempts = util.as_int(ini.maxorderattempts, 6, 1, 100),
     worker_url = ini.workerbaseurl or "",
     server_token = ini.servertoken or "",
+    replay_hook = util.as_bool(ini.enablereplayhook, true),   -- set false to leave Func pristine for disasm
 }
 
 -- ---------------------------------------------------------------- state
@@ -341,7 +342,7 @@ local function boot()
     load_queue()
     engine.configure({ data_dir = PATHS.data })
     engine._pre_flush = refresh_orders        -- every player craft re-reads orders.json first
-    engine.install_hook()
+    if CFG.replay_hook then engine.install_hook() else util.log("replay hook DISABLED by config") end
 
     -- one delayed startup scan, then the repeating loop
     if type(MakeActionHandle) == "function" and type(ExecuteInGameThreadWithDelay) == "function" then
