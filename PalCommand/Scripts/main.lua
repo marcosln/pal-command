@@ -215,9 +215,11 @@ local function write_stations(list)
     list = list or discovery.stations()
     local rows = {}
     for _, s in ipairs(list) do
+        local a = util.ok(function() return s.obj:GetAddress() end)
         rows[#rows + 1] = {
             key = s.key, name = s.name, baseId = s.baseId, baseName = s.baseName,
             recipes = s.recipes, state = s.state,
+            addr = a and string.format("%X", a) or nil,   -- diagnostic (for the r12b inspect op)
         }
     end
     util.write_file(PATHS.stations, json.encode({
@@ -352,6 +354,26 @@ local function boot()
     elseif type(ExecuteWithDelay) == "function" then
         ExecuteWithDelay(12000, function()
             if ExecuteInGameThread then ExecuteInGameThread(function() scan_cycle("startup") end) else scan_cycle("startup") end
+        end)
+    end
+
+    -- one-shot diagnostics for the no-player-entry hunt: dump the convert-model
+    -- UFunction API, and ask the bridge to walk the r12b chain for one station.
+    if type(ExecuteWithDelay) == "function" then
+        ExecuteWithDelay(22000, function()
+            local function go()
+                local api = pcall(discovery.dump_convert_api) and discovery.dump_convert_api() or {}
+                util.write_file(ROOT .. "\\data\\convert-api.json", json.encode(api))
+                util.log("convert-api dumped: " .. #api .. " functions")
+                if engine.native_ready and engine.native_ready() and engine.request_inspect then
+                    local st = discovery.station_for("Pal_crystal_S")
+                    if st and st.obj then
+                        local okk, err = engine.request_inspect(st.obj)
+                        util.log("r12b inspect: " .. tostring(okk) .. " " .. tostring(err))
+                    end
+                end
+            end
+            if ExecuteInGameThread then ExecuteInGameThread(go) else go() end
         end)
     end
     schedule_loop()

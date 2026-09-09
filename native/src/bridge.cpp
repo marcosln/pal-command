@@ -111,8 +111,13 @@ struct PendingCall {
     uint32_t bytes_offset = 0;      // FScriptArray header offset within the struct
     uint32_t params_size = 0;
     uint32_t byte_count = 0;
+    bool     is_inspect = false;    // read-only r12b-chain inspection, not a call
+    void*    inspect_fn = nullptr;  // 0x2EA97D0 (objA getter) for the inspect op
     uint8_t  bytes[kMaxArchiveBytes] = {0};
 };
+
+// filled by an inspect op, read back from native-inspect.ini
+static char g_inspect_result[512] = "";
 
 static std::atomic<PendingState> g_pending_state{PendingState::Idle};
 static PendingCall  g_pending;
@@ -256,6 +261,34 @@ static const char* invoke_process_event(void* obj, void* fn, void* params) {
     }
 }
 
+// Read-only: call the objA getter for `station`, then walk objA -> *(objA+0x78) ->
+// vtable -> [vtable+0x2B8]. No state change. Fills g_inspect_result.
+static const char* inspect_r12b_chain(void* station, void* get_objA) {
+    __try {
+        using Fn = void* (*)(void*);
+        void* objA = ((Fn)get_objA)(station);
+        uint64_t sub = 0, objA_cls = 0, sub_cls = 0, vt = 0, virt2b8 = 0;
+        if (readable(objA, 0x80)) {
+            objA_cls = *(uint64_t*)((uint8_t*)objA + 0x10);
+            sub = *(uint64_t*)((uint8_t*)objA + 0x78);
+        }
+        if (readable((void*)sub, 0x2C0)) {
+            sub_cls = *(uint64_t*)((uint8_t*)sub + 0x10);
+            vt = *(uint64_t*)sub;
+        }
+        if (readable((void*)vt, 0x2C0)) virt2b8 = *(uint64_t*)((uint8_t*)vt + 0x2B8);
+        _snprintf_s(g_inspect_result, _TRUNCATE,
+                    "objA=%llX objA_class=%llX sub=%llX sub_class=%llX vtable=%llX virt_2B8=%llX",
+                    (unsigned long long)(uintptr_t)objA, (unsigned long long)objA_cls,
+                    (unsigned long long)sub, (unsigned long long)sub_cls,
+                    (unsigned long long)vt, (unsigned long long)virt2b8);
+        return "inspected";
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        _snprintf_s(g_inspect_result, _TRUNCATE, "inspect-faulted");
+        return "inspect-crashed";
+    }
+}
+
 static void execute_pending_on_game_thread() {
     PendingState expected = PendingState::Armed;
     if (!g_pending_state.compare_exchange_strong(expected, PendingState::Executing)) return;
@@ -267,6 +300,14 @@ static void execute_pending_on_game_thread() {
     LeaveCriticalSection(&g_lock);
 
     const char* result = "unknown";
+    if (call.is_inspect) {
+        result = inspect_r12b_chain(call.station, call.inspect_fn);
+        EnterCriticalSection(&g_lock);
+        g_last_result = result;
+        g_pending_state.store(PendingState::Done);
+        LeaveCriticalSection(&g_lock);
+        return;
+    }
     if (!readable(call.station, sizeof(void*))) {
         result = "station-unreadable";
     } else if (!readable(call.function, sizeof(void*))) {
@@ -387,6 +428,22 @@ static void handle_request() {
         write_response(rid, "canceled", "");
         return;
     }
+
+    // read-only inspection of the r12b chain for a station (Codex step 3)
+    if (strcmp(op, "inspect") == 0) {
+        PendingCall ci;
+        ci.request_id = rid;
+        ci.is_inspect = true;
+        ci.station    = (void*)(uintptr_t)ini_u64(L"station", 16, &ok);       if (!ok || !ci.station)    { write_response(rid, "error", "station-invalid"); return; }
+        ci.inspect_fn = (void*)(uintptr_t)ini_u64(L"inspect_fn", 16, &ok);    if (!ok || !ci.inspect_fn) { write_response(rid, "error", "inspect-fn-invalid"); return; }
+        PendingState ex = PendingState::Idle;
+        if (!g_pending_state.compare_exchange_strong(ex, PendingState::Armed)) { write_response(rid, "error", "bridge-busy"); return; }
+        EnterCriticalSection(&g_lock); g_pending = ci; g_last_result = "none"; LeaveCriticalSection(&g_lock);
+        g_arm_count.fetch_add(1);
+        write_response(rid, "call-armed", "inspect-armed");
+        return;
+    }
+
     if (strcmp(op, "call") != 0) { write_response(rid, "error", "operation-invalid"); return; }
 
     PendingCall c;
@@ -423,13 +480,26 @@ static void reap_done() {
     if (g_pending_state.load() != PendingState::Done) return;
     uint64_t rid;
     const char* result;
+    bool was_inspect;
     EnterCriticalSection(&g_lock);
     rid = g_pending.request_id;
     result = g_last_result;
+    was_inspect = g_pending.is_inspect;
     g_pending = PendingCall{};
     g_last_result = "none";
     LeaveCriticalSection(&g_lock);
     g_pending_state.store(PendingState::Idle);
+    if (was_inspect) {
+        char buf[640];
+        _snprintf_s(buf, _TRUNCATE, "[inspect]\nrequest_id=%llu\nresult=%s\n%s\n",
+                    (unsigned long long)rid, result, g_inspect_result);
+        wchar_t ip[MAX_PATH * 2];
+        _snwprintf_s(ip, _TRUNCATE, L"%ls\\data\\native-inspect.ini", g_root);
+        write_atomic(ip, buf);
+        write_response(rid, "inspected", g_inspect_result);
+        write_status("armed", rid, "inspected");
+        return;
+    }
     bool called = strcmp(result, "process-event-returned") == 0;
     write_response(rid, called ? "called" : "error", result);
     write_status("armed", rid, result);

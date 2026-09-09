@@ -332,32 +332,89 @@ function M.player_id_probe()
     return { id = pick and pick.id or nil, source = pick and pick.source or "none", candidates = cands }
 end
 
---- RequestPlayerId of a CURRENTLY CONNECTED player only.
--- ChangeRecipe_ServerInternal resolves the player's guild via the live
--- PlayerController list; a stale/offline id resolves to a zero guid and the RPC
--- silently no-ops. So the native backend must use this, never a persisted id.
--- Returns int32 id or nil (nil => do not arm a native call, keep the order queued).
-function M.connected_player_id()
+--- Every UFunction whose outer is PalMapObjectConvertItemModel or a superclass.
+-- Used to hunt for a no-player recipe/work entry (Load/PostLoad/OnRep/Restore/...).
+function M.dump_convert_api()
+    local wanted = {
+        PalMapObjectConvertItemModel = true, PalMapObjectDeployItemModel = true,
+        PalMapObjectModel = true, PalMapObjectConcreteModelBase = true,
+        PalMapObjectModelBase = true, PalWorkableBase = true, PalWorkBase = true,
+        PalMapObjectItemStorageModel = true, Object = false,
+    }
+    local seen, out = {}, {}
+    local list = util.find_all("Function")
+    if #list == 0 then list = util.find_all("Struct") end
+    for _, fn in ipairs(list) do
+        local outer = ok(function() return fn:GetOuter() end)
+        local on = outer and fstr(ok(function() return outer:GetName() end)) or ""
+        if wanted[on] then
+            local n = fstr(ok(function() return fn:GetFName() end))
+            local key = on .. ":" .. n
+            if n ~= "" and not seen[key] then seen[key] = true; out[#out + 1] = key end
+        end
+    end
+    table.sort(out)
+    return out
+end
+
+--- Iterate live (connected) player controllers. cb(pc, ps, pid).
+local function for_each_connected(cb)
     for _, pc in ipairs(util.find_all("PalPlayerController")) do
         if valid(pc) and not_default(pc) then
-            -- a live controller must have a possessed pawn OR an active net connection
-            local has_pawn = ok(function() return pc:GetPawn() end) ~= nil
+            local live = ok(function() return pc:GetPawn() end) ~= nil
                 or ok(function() return pc.Pawn end) ~= nil
-            local has_conn = ok(function() return pc.NetConnection end) ~= nil
+                or ok(function() return pc.NetConnection end) ~= nil
                 or ok(function() return pc:GetNetConnection() end) ~= nil
-            if has_pawn or has_conn then
+            if live then
                 local ps = ok(function() return pc.PlayerState end)
                     or ok(function() return pc:GetPlayerState() end)
                 if ps and valid(ps) then
                     local pid = ok(function() return ps:GetPlayerId() end)
                     if pid == nil then pid = ok(function() return ps.PlayerId end) end
                     local n = tonumber(pid)
-                    if n and n ~= 0 then return math.floor(n) end
+                    if n and n ~= 0 then cb(pc, ps, math.floor(n)) end
                 end
             end
         end
     end
-    return nil
+end
+
+--- Any connected player's RequestPlayerId, or nil. (Gate/diagnostics only.)
+function M.connected_player_id()
+    local found
+    for_each_connected(function(_, _, pid) found = found or pid end)
+    return found
+end
+
+local function group_id_of(o)
+    if not o then return nil end
+    local g = fstr(ok(function() return o.GroupIdBelongTo end))
+    if g == "" then g = fstr(ok(function() return o.GroupID end)) end
+    if g == "" then g = fstr(ok(function() return o:GetGroupID() end)) end
+    if g == "" then g = fstr(ok(function() return o:GetGroupId() end)) end
+    return (g ~= "" and g) or nil
+end
+
+--- RequestPlayerId of a connected player who is in the SAME guild/group as the
+-- station's base camp. ChangeRecipe_ServerInternal resolves the caller's guild
+-- and matches it against the station's -- a wrong-guild id is a silent no-op.
+-- Returns id, reason. reason "guild-match" is confirmed; "any-connected" is a
+-- best-effort fallback (the strict verifier re-queues if the RPC no-ops).
+function M.connected_player_for_station(station_obj)
+    local base = ok(function() return station_obj:GetBaseCampModelBelongTo() end)
+    local st_group = group_id_of(base)
+    local any
+    local match
+    for_each_connected(function(pc, ps, pid)
+        any = any or pid
+        if st_group then
+            local pg = group_id_of(ps)
+            if pg and pg == st_group then match = match or pid end
+        end
+    end)
+    if match then return match, "guild-match" end
+    if any then return any, "any-connected(guild " .. tostring(st_group) .. " unverified)" end
+    return nil, "no-connected-player"
 end
 
 return M
