@@ -11,12 +11,21 @@ Full orderable recipe set = **1217 distinct recipe ids** (union of `RecipeIds` a
 | **stale / nonexistent target mapId** | ✅ PASS | `Charcoal x2` with `target: "00000…0000"` → no bonus, routed to `BlastFurnace3 0fdd2d10` (idle, capable). Covers "machine gone after restart" from the mod's POV (a demolished machine = a non-matching mapId). |
 | **cancel a placed order (by recipe/id)** | ✅ PASS | `{"cancel":"Pal_crystal_S"}` → `engine.cancel_station` → `PalMapObjectConvertItemModel:Cancel_ServerInternal(256)` (plain Lua call). Crusher B went `Pal_crystal_S x15 workable=true` → **`None`** (verified seq 11). `recent[]` = "cancelled", `placedWatch` entry removed. `probe_cancel`: `Cancel_ServerInternal` takes **one int32 `RequestPlayerId`, no archive** (flags 40401). |
 
-## CODE DONE, DEPLOYED (db33c12), NOT YET LIVE-CHECKED — needs a connected player
+## LIVE-VERIFIED (cont.) — 2026-09-09 ~20:21-20:27Z, base A, pid 256
 
-| case | plan |
-|------|------|
-| **cancel by explicit mapId, not in the ledger** | after a restart the in-mem `_placed_watch` is empty, so `{"cancel":"<mapId>"}` now also clears that one station directly (explicit user action). Test: `[{"cancel":"8c53a7e99567433bb363ca12226836b8"},{"cancel":"0fdd2d104f4bd80419c88284e51c1839"}]` → the 2 pre-restart leftovers should clear. |
-| **placed but not producing (no material / Pal / power)** | soft `stalled` flag only. `state.json` → `engine.placedWatch[]` = `{recipe, target, producing, workable, stalled}`. NEVER a failure, never re-queued/retried, one log line. Design (per user): placing a recipe a machine can't work yet IS correct — the game crafts it when the base can. Test: order `Charcoal x5` at a Base A furnace with no free Pal, wait ~3 min → `stalled:true`, NO "warning" in `recent[]`. |
+| case | result | evidence |
+|------|--------|----------|
+| **cancel by explicit mapId, not in the ledger** | ✅ PASS | `_placed_watch` empty (post-restart). `[{"cancel":"8c53a7e9…"},{"cancel":"0fdd2d10…"}]` → log `cancel (explicit mapId) Pal_crystal_S @ 8c53a7e9 -> true` + same for Charcoal @ 0fdd2d10. Both machines `recipe → None` (next scan). `recent[]` = 2× "cancelled" / "explicit mapId: Cancel_ServerInternal(pid)". |
+| **placed but not producing** | ✅ PASS | `Charcoal x5` → Pal-less Base A furnace `0fdd2d10`. VERIFIED → `recent[]` = **"placed"** (not a failure). At age 119s: `placedWatch[] = {producing:false, workable:false, stalled:true}` + one log line `note: … placed but not producing (no power / kindling Pal / fuel / free work slot) -- the base will craft it when it can`. **NO "warning" in recent[]**, never re-queued. Cleaned up with `{"cancel":"Charcoal"}` (ledger path this time). |
+
+## 1.4 VERDICT: COMPLETE — all 6 edge cases pass
+
+## Cosmetic bug found (fix next deploy)
+
+`main.lua scan_cycle` calls `write_stations()` **before** `ingest_orders()`, so for one
+scan (~30s) after any order/cancel the published `stations.json` shows the old machine
+state (e.g. a cancelled recipe still listed). `state.json` and the log are correct
+immediately. Fix: move `write_stations()` to after the flush, or write it twice.
 
 ## CORRECTION to run-1 "1.4-c: not enough materials"
 
