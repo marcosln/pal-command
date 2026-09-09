@@ -85,10 +85,19 @@ Native backend, works whenever ANY player is online (AFK, never crafts).
 
 ## STAGE 5 — Polish + publish
 
-- [ ] 5.1 PWA install / icon / offline / theme
+**Distribution plan (user, 2026-09-09):** PWA-first the whole way; the App Store IS
+the eventual target (user will pay the $99/yr Apple Developer Program — open the
+account a few days before this stage). At 5.4 wrap the existing PWA with **Capacitor**
+(no rewrite — same web code) → TestFlight → App Store. Build the PWA wrapper-friendly
+from the start: relative asset paths, no desktop-only assumptions, nothing that
+breaks in WKWebView, and one small real native capability so it clears App Review
+guideline 4.2 ("not just a web view"). Name already avoids the Palworld trademark
+("Pal Command") — matters more for App Review than for a PWA link.
+
+- [ ] 5.1 PWA install / icon / offline / theme — built Capacitor-ready
 - [ ] 5.2 Mod packaging + install README for strangers
 - [ ] 5.3 Publish mod (Nexus)
-- [ ] 5.4 App distribution (PWA link / TestFlight)
+- [ ] 5.4 Capacitor wrap → TestFlight → App Store submission (needs the Apple Developer account)
 
 ## DEFERRED — Zero-player autonomy
 
