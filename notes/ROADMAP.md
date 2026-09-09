@@ -19,9 +19,12 @@ resume at the offline self-test).
 
 ---
 
-## STAGE 1 — Crafting must be perfect (CONNECTED-PLAYER MODE)  ← CURRENT
+## STAGE 1 — Crafting must be perfect (CONNECTED-PLAYER MODE)  ✅ effectively DONE
 
 Native backend, works whenever ANY player is online (AFK, never crafts).
+1.1-1.4, 1.6, 1.8 all verified live. 1.5 deferred (user: manual per-machine, not fan-out).
+1.7 deferred to Stage 5 (replay fallback only matters for the no-DLL packaging).
+**← NEXT: Stage 2 (rules), then Stage 4 (cloud + PWA).**
 
 - [x] 1.1 Multi-machine place + whole-queue drain <!-- done 2026-09-09: commit 761d03c; M.place iterates all stations for a recipe (discovery.stations_for), native_tick chains the next order on a verified placement. Deployed. Not yet stress-tested live (that's 1.3/1.6). -->
 - [x] 1.2 Per-machine identity (persistent mapId) + world position + machine type
@@ -45,8 +48,22 @@ Native backend, works whenever ANY player is online (AFK, never crafts).
 - [~] 1.5 "Craft X on ALL machines that can" (fan-out) — **DEFERRED** (user 2026-09-09:
       wants manual per-machine control, not broadcast). Revisit as an optional
       power-user action after the map/app exist.
-- [ ] 1.6 Stress: full queue (8+), verify drain, timing, and that joins never block
-- [ ] 1.7 Replay fallback still correct when native is off (same-length recipe ids)
+- [x] 1.6 Stress: full queue (8+), drain, timing, joins.
+      <!-- done 2026-09-09 21:29 (deploy 62bc06d, dynamic scan): wrote 8 orders (7 pinned to
+      distinct machines across all 3 bases incl. the outpost, 1 unpinned). "ingested 8" ->
+      all 8 VERIFIED 21:28:56..21:29:06 = **~10s total**, one-by-one via the native_tick chain.
+      placed=8 failed=0 queueDepth=0, all recent[]="placed". [pinned] tag confirms 1.8 routing;
+      FIFO held (array order); unpinned one fell to a free furnace. No scan_cycle error / no
+      traceback / no game-thread stall during the drain. {"cancel":"all"} then cleared all 6
+      still-tracked -> every machine back to idle. Couldn't test a live join mid-drain (need a
+      2nd player) but 10s of non-blocking async activity + the design (650ms poke, no forced
+      disk sync) cover it. Minor: an unpinned order's cancel logs "@ nil" instead of the real
+      mapId (cosmetic). Note: tiny test batches showed producing=false for a while because the
+      base was saturated (Salad x1948 + Cake03 x202 + Plastic x2) -- not a bug, Pals were busy. -->
+- [ ] 1.7 Replay fallback still correct when native is off (same-length recipe ids).
+      Needs: DLL renamed off + restart + the USER manually crafts a recipe in-game (replay
+      borrows that live PalNetArchive). Lower priority — native is the deployed default and
+      solid. Do when the no-DLL path actually matters (Stage 5 packaging).
 - [x] 1.8 Targeting: an explicit machine `target` is a HARD PIN.
       <!-- done 2026-09-09 (code 62bc06d, DEPLOYED to server, restart pending): user settled it -- picking a machine
       means "use THIS machine". engine.M.place: if `target` (mapId / "key#index" / key)
