@@ -8,9 +8,14 @@ Goal: a publishable **iPhone app (PWA)** + distributable **UE4SS mod** for any
 Palworld dedicated server — see whole-server storage, order crafts on any machine,
 set standing rules. Crafting stays legit (real machine, real cost, a Pal works).
 
-**Order of work (user, 2026-09-09):** 1) perfect the crafting → 2) easy 2D map →
-3) cloud + app wiring → 4) polish/publish. **Zero-player autonomy is DEFERRED**
-(research saved; `r12b=TRUE` offline confirmed — resume at the offline self-test).
+**BUILD ORDER (revised 2026-09-09 — supersedes the stage numbers below):**
+Stage 1 (crafting) → Stage 2 (rules) → **Stage 4 (cloud + PWA wired = the phone
+works)** → **Stage 3 (2D map)** → Stage 5 (polish/publish). The map moved AFTER the
+app because 3.3/3.4 are PWA features (canvas, tap-a-machine-to-order) that need the
+connected PWA from Stage 4 to exist first; only 3.1/3.2 (mod publishes map.json) are
+independent and slot in just before 3.3.
+**Zero-player autonomy is DEFERRED** (research saved; `r12b=TRUE` offline confirmed —
+resume at the offline self-test).
 
 ---
 
@@ -63,7 +68,7 @@ Native backend, works whenever ANY player is online (AFK, never crafts).
 - [ ] 2.3 No spam — respect in-flight + cooldowns
 - [ ] 2.4 Rules survive restart; test with a real low-stock trigger
 
-## STAGE 3 — Easy 2D map (schematic)
+## STAGE 3 — Easy 2D map (schematic)   ← BUILD AFTER STAGE 4 (see BUILD ORDER up top)
 
 - [ ] 3.1 Read positions: bases, machines, chests, Pals (needs 1.2 position work)
 - [ ] 3.2 `map.json` published by the mod (normalized coords + labels)
