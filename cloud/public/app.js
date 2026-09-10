@@ -11,6 +11,7 @@ const cfg = {
 let SNAP = null;
 let rulesDraft = null;
 let timer = null;
+let forcing = false;
 let activeCat = localStorage.getItem(LS.cat) || "*";
 const prevQty = {};
 
@@ -152,6 +153,7 @@ function show(tab) {
 
 function conn() {
   const c = $("#conn"); c.hidden = false;
+  if (forcing) return;                       // leave the "actualizando…" label alone
   const s = SNAP?.state, b = s?.backend || s?.engine?.backend;
   const player = s?.engine?.connectedPid != null;
   let cls = "", txt = "sin datos", glow = "rgba(234,169,74,.14)";
@@ -162,7 +164,8 @@ function conn() {
   } else if (b === "replay") { cls = "wait"; txt = "al craftear"; glow = "rgba(234,181,74,.15)"; }
   if (s?.lastError) { cls = "bad"; txt = "aviso"; glow = "rgba(229,113,90,.16)"; }
   c.className = "conn " + cls;
-  $("#connText").textContent = txt + (s?.lastScan ? " · " + ago(s.lastScan) : "");
+  c.title = "Tocar para actualizar el inventario ahora";
+  $("#connText").textContent = txt + (s?.lastScan ? " · " + ago(s.lastScan) : "") + (cfg.demo ? "" : " ↻");
   $("#ambient").style.setProperty("--glow", glow);
 }
 
@@ -521,6 +524,32 @@ async function refresh(opts = {}) {
   }
 }
 
+// Tap the status pill -> ask the mod for an immediate full inventory walk, then
+// poll for it to land (its loop ticks every ~10s).
+async function forceRefresh() {
+  if (forcing || cfg.demo || !cfg.url) return;
+  forcing = true;
+  const c = $("#conn");
+  c.classList.add("busy");
+  $("#connText").textContent = "actualizando…";
+  const before = SNAP?.state?.lastScan;
+  try {
+    await api("/api/snapshot?fresh=1&pulse=force");
+    for (let i = 0; i < 4; i++) {
+      await new Promise((r) => setTimeout(r, 4000));
+      await refresh({ fresh: true });
+      if (SNAP?.state?.lastScan && SNAP.state.lastScan !== before) break;
+    }
+    toast("Inventario al día");
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    forcing = false;
+    c.classList.remove("busy");
+    conn();
+  }
+}
+
 async function order() {
   const recipe = $("#ordRecipe").value;
   const count = Math.max(1, Math.floor(Number($("#ordCount").value) || 0));
@@ -595,6 +624,7 @@ $("#ordRecipe").addEventListener("change", renderMachines);
 $("#rulesSave").addEventListener("click", saveRules);
 $("#ruleAdd").addEventListener("click", () => { (rulesDraft ||= []).push({ item: "", min: 0, target: 0, enabled: true }); renderRules(); $("#rulesSave").hidden = false; });
 $("#q").addEventListener("input", renderStock);
+$("#conn").addEventListener("click", forceRefresh);
 $("#scrim").addEventListener("click", closeSheet);
 $$("#tabs button").forEach((b) => b.addEventListener("click", () => show(b.dataset.tab)));
 document.addEventListener("visibilitychange", () => { if (!document.hidden && $("#v-setup").hidden) refresh(); });

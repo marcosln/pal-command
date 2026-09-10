@@ -31,6 +31,7 @@ local PATHS = {
     rules = ROOT .. "\\data\\rules.json",
     queue = ROOT .. "\\data\\queue.json",
     state = ROOT .. "\\data\\state.json",
+    pulse = ROOT .. "\\data\\pulse.json",   -- app writes here: "someone's watching / refresh now"
 }
 util.set_logfile(PATHS.log)
 
@@ -46,6 +47,10 @@ local CFG = {
     default_transport = util.as_bool(ini.defaulttransporttostorage, true),
     include_guild = util.as_bool(ini.includeguildchest, true),
     max_attempts = util.as_int(ini.maxorderattempts, 6, 1, 100),
+    -- while the app is open it writes pulse.json; within this window the mod keeps
+    -- ACTIVE cadence and walks the full inventory more often (every 2nd scan).
+    pulse_window = util.as_int(ini.pulseactivewindowseconds, 120, 0, 3600),
+    inventory_every_nth = util.as_int(ini.inventoryeverynthscan, 4, 1, 20),
     worker_url = ini.workerbaseurl or "",
     server_token = ini.servertoken or "",
     replay_hook = util.as_bool(ini.enablereplayhook, true),
@@ -433,21 +438,48 @@ local function schedule_loop()
     local IDLE = math.max(ACTIVE, CFG.idle_scan_interval)
     local last_heavy = 0                                  -- os.time() of the last heavy scan
     local heavy_n = 0
+    local handled_pulse = 0                               -- last pulse seq we acted on (the button)
 
     local function orders_waiting()
         local raw = util.read_file(PATHS.orders)
         return raw ~= nil and raw:match("[^%s%[%]]") ~= nil   -- non-empty and not just "[ ]"
     end
 
+    -- pulse.json: { at = <unix ms>, seq = <n>, force = <bool> }. `at` recent =>
+    -- the app is open (tighten cadence). `force` with a new seq => the refresh
+    -- button: do one full inventory walk on the very next tick.
+    local function read_pulse()
+        local raw = util.read_file(PATHS.pulse)
+        if not raw or not raw:match("%d") then return nil end
+        local ok, p = pcall(json.decode, raw)
+        if ok and type(p) == "table" then return p end
+        return nil
+    end
+
     local function tick_fn()
         local now = os.time()
-        local active = (#S.queue > 0) or engine._native_pending
+        local p = read_pulse()
+        local p_at = p and tonumber(p.at) or 0
+        local p_fresh = CFG.pulse_window > 0 and p_at > 0
+            and (now * 1000 - p_at) < (CFG.pulse_window * 1000)
+        local p_seq = p and (tonumber(p.seq) or tonumber(p.at)) or 0
+        local p_force = p and p.force and p_seq > handled_pulse
+
+        local active = p_fresh or (#S.queue > 0) or engine._native_pending
             or (now - (S.lastOrderAt or 0) < math.max(150, ACTIVE * 3))
             or orders_waiting()
-        if now - last_heavy < (active and ACTIVE or IDLE) then return end
+
+        local due = (now - last_heavy) >= (active and ACTIVE or IDLE)
+        if not due and not p_force then return end
+
         last_heavy = now
         heavy_n = heavy_n + 1
-        local light = (heavy_n % 4 ~= 1)                  -- full inventory every 4th heavy scan
+        local nth = p_fresh and 2 or CFG.inventory_every_nth
+        local light = (heavy_n % nth ~= 1)                -- full inventory every nth heavy scan
+        if p_force then
+            light = false                                -- button: full walk this scan
+            handled_pulse = p_seq
+        end
         if type(ExecuteInGameThread) == "function" then
             ExecuteInGameThread(function() scan_cycle("interval", light) end)
         else
@@ -457,7 +489,7 @@ local function schedule_loop()
 
     if type(LoopAsync) == "function" then
         LoopAsync(TICK * 1000, function() pcall(tick_fn); return false end)
-        util.log(string.format("scan loop: dynamic (tick %ds, active %ds, idle %ds)", TICK, ACTIVE, IDLE))
+        util.log(string.format("scan loop: dynamic (tick %ds, active %ds, idle %ds, pulse %ds, inv every %d)", TICK, ACTIVE, IDLE, CFG.pulse_window, CFG.inventory_every_nth))
         return
     end
     if type(ExecuteWithDelay) == "function" then

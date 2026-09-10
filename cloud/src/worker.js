@@ -262,6 +262,24 @@ async function readJson(dh, name, fallback) {
   try { return JSON.parse(raw); } catch { return fallback; }
 }
 
+// Write data/pulse.json so the mod knows the app is open. Throttled to ~1 write
+// per 12s (tracked in KV) unless force=1 — the refresh button, which also asks
+// for one immediate full inventory walk.
+async function maybePulse(dh, env, pulseParam) {
+  const force = pulseParam === "force";
+  try {
+    if (!force) {
+      const last = await env.CACHE.get("pulsed");
+      if (last && Date.now() - Number(last) < 12000) return;
+    }
+    const now = Date.now();
+    await Promise.all([
+      dh.writeFile("pulse.json", JSON.stringify({ at: now, seq: now, force: !!force })),
+      env.CACHE.put("pulsed", String(now), { expirationTtl: 60 }),
+    ]);
+  } catch { /* best-effort */ }
+}
+
 // ------------------------------------------------------------------ API
 
 async function handleApi(request, env, ctx, url) {
@@ -300,6 +318,9 @@ async function handleApi(request, env, ctx, url) {
   if (path === "snapshot" && request.method === "GET") {
     const ttl = parseInt(env.SNAPSHOT_TTL_SECONDS || "15", 10);
     const cacheKey = `snap:${env.DATHOST_SERVER_ID}`;
+    // Tell the mod the app is open (pulse.json) so it tightens its scan cadence.
+    // `?pulse=force` (the refresh button) always writes; a plain poll is throttled.
+    ctx.waitUntil(maybePulse(dh, env, url.searchParams.get("pulse")));
     if (!url.searchParams.has("fresh")) {
       const cached = await env.CACHE.get(cacheKey, "json");
       if (cached) return json({ ...cached, cached: true });

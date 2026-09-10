@@ -96,7 +96,15 @@
     display: inline-flex; align-items: center; gap: 7px; background: var(--surf-2);
     border: 1px solid var(--hair); border-radius: 999px; padding: 6px 12px 6px 9px;
     font: 500 11.5px/1 "IBM Plex Mono", monospace; color: var(--ink-2); letter-spacing: .02em;
+    cursor: pointer; -webkit-tap-highlight-color: transparent; transition: opacity .15s;
   }
+  .conn:active { opacity: .6; }
+  .conn.busy { opacity: .7; }
+  @media (prefers-reduced-motion: no-preference) {
+    .conn.busy .pulse { animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(1turn); } }
+  }
+  .conn.busy .pulse { border-radius: 3px; box-shadow: none; background: var(--wait); }
   .conn .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); flex: none;
     box-shadow: 0 0 0 0 currentColor; }
   .conn.live { color: var(--live); } .conn.live .pulse { background: var(--live); }
