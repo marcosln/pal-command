@@ -65,14 +65,15 @@ const ICON_KEY = "/icon/e1/";
 function iconCandidates(id) {
   const out = [];
   const push = (s) => { if (s && !out.includes(s)) out.push(s); };
-  const base = id.replace(/^Blueprint_/, "").replace(/_\d+$/, "");   // Blueprint_Katana_2 -> Katana
-  const snake = (s) => s.replace(/([a-z0-9])([A-Z])/g, "$1_$2");     // CompoundBow -> Compound_Bow (paldb slugs are display-name based)
+  const strip = (s) => s.replace(/_(Tier_)?\d+$/i, "");             // Pickaxe_Tier_01 -> Pickaxe, Katana_2 -> Katana
+  const base = strip(id.replace(/^Blueprint_/, ""));                // Blueprint_Katana_2 -> Katana
+  const snake = (s) => s.replace(/([a-z0-9])([A-Z])/g, "$1_$2");    // CompoundBow -> Compound_Bow (paldb slugs are display-name based)
   push(ICON_ALIAS[id]);
   push(id);
-  push(id.replace(/_\d+$/, ""));
+  push(strip(id));
   push(base);
   push(snake(base));
-  push(snake(id.replace(/_\d+$/, "")));
+  push(snake(strip(id)));
   return out.slice(0, 6);
 }
 
@@ -180,7 +181,12 @@ async function resolveIcon(id) {
   // paldb's texture names mirror the game's internal ids
   // (T_itemicon_Material_CopperIngot, T_itemicon_Ammo_RifleBullet); the raw id
   // is the best guess, the alias slug the runner-up.
-  const names = [...new Set([id, id.replace(/_\d+$/, ""), ICON_ALIAS[id]].filter(Boolean))];
+  const names = [...new Set([
+    id,
+    id.replace(/_Tier_\d+$/i, "_Tier_00"),   // tools share the tier-00 texture
+    id.replace(/_(Tier_)?\d+$/i, ""),
+    ICON_ALIAS[id],
+  ].filter(Boolean))];
   for (const n of names) {
     for (const g of [`Material_${n}`, `Food_${n}`, `Consume_${n}`, `Ammo_${n}`, `Weapon_${n}`, `Armor_${n}`, n]) {
       const got = await asIcon(CDN + g + ".webp");
