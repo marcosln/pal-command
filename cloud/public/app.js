@@ -159,19 +159,23 @@ function slotEl(id, qty, opts = {}) {
 }
 
 // Per-session memory of what resolved, so the 20s re-render doesn't re-probe
-// every icon (and re-hammer the few that have no art). Cleared on reload — by
-// then KV may have filled a gap.
-const iconSeen = new Map();   // id -> "ok" | "bad"
+// every icon. Value: "ok", or a number = how many render cycles it has failed.
+// A big inventory has ~100+ cold icons on first load; the worker warms them into
+// KV over the next few polls, so we give each id 3 cycles before giving up.
+// Cleared on reload.
+const iconSeen = new Map();
+const ICON_GIVE_UP = 4;   // render cycles before a cold icon falls back to its letter
+// families paldb has no item art for — skip the <img> entirely, just show the letter
+const NO_ICON = /^(SkillCard_|WorkSuitability_AddTicket_|PalSummon_|Emote_|Record_|DesignFile_)/i;
 
 // The letter tile is the *default* — a slot is never blank. Drop an <img> on top
-// and reveal it only once it truly decodes. A cold proxy resolve is a paldb
-// scrape (~1-4s, can briefly 429), so retry a few times with a widening delay,
-// then settle: known-good ids skip straight to the image next render, known-bad
-// ids never build an <img> again this session.
+// and reveal it only once it truly decodes.
 function mountIcon(host, id, kind) {
-  if (iconSeen.get(id) === "bad") return null;
+  if (NO_ICON.test(id)) return null;
+  const seen = iconSeen.get(id);
+  if (typeof seen === "number" && seen >= ICON_GIVE_UP) return null;
   const img = el("img", kind === "mini" ? { alt: "" } : { decoding: "async", alt: "" });
-  const wasOk = iconSeen.get(id) === "ok";
+  const wasOk = seen === "ok";
   let tries = 0, timer, done = false;
   const good = () => {
     if (img.naturalWidth <= 2) return again();
@@ -181,8 +185,11 @@ function mountIcon(host, id, kind) {
   const again = () => {
     if (done) return;
     clearTimeout(timer);
-    const sched = wasOk ? [800, 4000] : [1500, 7000];
-    if (tries >= sched.length) { if (!wasOk) iconSeen.set(id, "bad"); return; }
+    const sched = wasOk ? [800, 4000] : [1500, 6000];
+    if (tries >= sched.length) {
+      if (!wasOk) iconSeen.set(id, (typeof seen === "number" ? seen : 0) + 1);
+      return;
+    }
     timer = setTimeout(() => { if (!done) img.src = iconUrl(id) + "?r=" + (++tries); }, sched[tries]);
   };
   img.addEventListener("load", good);

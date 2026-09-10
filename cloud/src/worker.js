@@ -65,12 +65,15 @@ const ICON_KEY = "/icon/e1/";
 function iconCandidates(id) {
   const out = [];
   const push = (s) => { if (s && !out.includes(s)) out.push(s); };
+  const base = id.replace(/^Blueprint_/, "").replace(/_\d+$/, "");   // Blueprint_Katana_2 -> Katana
+  const snake = (s) => s.replace(/([a-z0-9])([A-Z])/g, "$1_$2");     // CompoundBow -> Compound_Bow (paldb slugs are display-name based)
   push(ICON_ALIAS[id]);
   push(id);
-  push(id.replace(/_\d+$/, ""));                       // Katana_2 -> Katana
-  const noBp = id.replace(/^Blueprint_/, "");
-  if (noBp !== id) { push(noBp); push(noBp.replace(/_\d+$/, "")); }
-  return out.slice(0, 4);
+  push(id.replace(/_\d+$/, ""));
+  push(base);
+  push(snake(base));
+  push(snake(id.replace(/_\d+$/, "")));
+  return out.slice(0, 6);
 }
 
 const ICON_TTL = "public, max-age=604800, stale-while-revalidate=86400";
@@ -79,10 +82,13 @@ const txt404 = () => new Response("no icon", { status: 404, headers: { "content-
 // Pre-resolve the icons for an inventory into KV so the grid never waits on a
 // cold paldb scrape. Gentle (2-wide) and only fills entries KV doesn't have.
 async function warmIcons(inventory, env, ctx) {
-  const ids = Object.keys((inventory && inventory.totals) || {}).slice(0, 60);
+  // every item — 3-wide, skip-cached. One poll won't finish a big inventory, but
+  // each subsequent poll picks up where the last left off, so KV fills within a
+  // few minutes and then every grid paint is instant.
+  const ids = Object.keys((inventory && inventory.totals) || {});
   let inflight = 0, i = 0;
   const next = () => {
-    while (i < ids.length && inflight < 2) {
+    while (i < ids.length && inflight < 3) {
       const id = ids[i++]; inflight++;
       env.CACHE.get("icon:" + id).then(async (have) => {
         if (have === null) {
@@ -180,6 +186,13 @@ async function resolveIcon(id) {
       const got = await asIcon(CDN + g + ".webp");
       if (got) return got;
     }
+  }
+
+  // every blueprint shows the same schematic icon in-game, so a Blueprint_* that
+  // didn't resolve to its target item still gets the generic scroll.
+  if (/^Blueprint_/i.test(id)) {
+    const got = await asIcon(CDN + "Material_Blueprint.webp");
+    if (got) return got;
   }
   return null;
 }
