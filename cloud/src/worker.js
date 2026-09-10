@@ -22,6 +22,9 @@ const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/icon/")) {
+      return iconProxy(url.pathname.slice("/icon/".length), request, ctx);
+    }
     if (!url.pathname.startsWith("/api/")) {
       return env.ASSETS.fetch(request);
     }
@@ -32,6 +35,53 @@ export default {
     }
   },
 };
+
+// ------------------------------------------------------------------ item icons
+// GET /icon/<ItemId>  ->  the item's icon (webp), proxied + edge-cached from
+// paldb.cc. First hit scrapes the item page for the CDN url; 404 -> 1x1 gif so
+// the app's <img onerror> can drop in a fallback tile.
+
+const PX = Uint8Array.from(atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"), (c) => c.charCodeAt(0));
+
+async function iconProxy(rawId, request, ctx) {
+  const id = rawId.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
+  if (!id) return new Response(PX, { status: 404, headers: { "content-type": "image/gif" } });
+
+  const cache = caches.default;
+  const key = new Request(new URL(request.url).origin + "/icon/" + id, { method: "GET" });
+  const hit = await cache.match(key);
+  if (hit) return hit;
+
+  let out;
+  try {
+    const page = await fetch("https://paldb.cc/en/" + encodeURIComponent(id), {
+      headers: { "user-agent": "PalCommand/1.0" }, cf: { cacheTtl: 86400 },
+    });
+    const html = page.ok ? await page.text() : "";
+    const m = html.match(/https:\/\/cdn\.paldb\.cc\/image\/[^"'\s)]+T_itemicon_[^"'\s)]+\.(?:webp|png)/i);
+    if (m) {
+      const img = await fetch(m[0], { cf: { cacheTtl: 604800 } });
+      if (img.ok) {
+        out = new Response(img.body, {
+          status: 200,
+          headers: {
+            "content-type": img.headers.get("content-type") || "image/webp",
+            "cache-control": "public, max-age=604800, immutable",
+          },
+        });
+      }
+    }
+  } catch { /* fall through */ }
+
+  if (!out) {
+    out = new Response(PX, {
+      status: 404,
+      headers: { "content-type": "image/gif", "cache-control": "public, max-age=86400" },
+    });
+  }
+  ctx.waitUntil(cache.put(key, out.clone()));
+  return out;
+}
 
 // ------------------------------------------------------------------ helpers
 
