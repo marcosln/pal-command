@@ -38,8 +38,8 @@ export default {
 
 // ------------------------------------------------------------------ item icons
 // GET /icon/<ItemId>  ->  the item's icon (webp), proxied + edge-cached from
-// paldb.cc. First hit scrapes the item page for the CDN url; 404 -> 1x1 gif so
-// the app's <img onerror> can drop in a fallback tile.
+// paldb.cc. First hit resolves the CDN url (see resolveIcon); a miss returns a
+// text/plain 404 and the app draws a letter tile in its place.
 
 // paldb.cc slugs are display-name based, not the game's internal ids. Map the
 // mismatches; everything else we try as-is (many ids do resolve).
@@ -58,6 +58,9 @@ const ICON_ALIAS = {
   Honey: "Honey", Wheat: "Wheat", Egg: "Egg", Milk: "Milk", Flour: "Flour",
 };
 
+// bump the version segment to flush the edge cache after a resolver change
+const ICON_KEY = "/icon/v8/";
+
 function iconCandidates(id) {
   const out = [];
   const push = (s) => { if (s && !out.includes(s)) out.push(s); };
@@ -69,52 +72,100 @@ function iconCandidates(id) {
   return out.slice(0, 4);
 }
 
-async function iconProxy(rawId, request, ctx) {
-  const id = rawId.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
-  if (!id) return new Response("bad id", { status: 404, headers: { "content-type": "text/plain" } });
-
+async function warmIcons(inventory, origin, ctx) {
+  const ids = Object.keys((inventory && inventory.totals) || {}).slice(0, 60);
   const cache = caches.default;
-  const key = new Request(new URL(request.url).origin + "/icon/v3/" + id, { method: "GET" });
-  const hit = await cache.match(key);
-  if (hit) return hit;
+  let inflight = 0, i = 0;
+  // keep it gentle — paldb 429s a burst, and a cached miss is retried on the
+  // next snapshot anyway (short 404 TTL).
+  const next = async () => {
+    while (i < ids.length && inflight < 2) {
+      const id = ids[i++]; inflight++;
+      const key = new Request(origin + ICON_KEY + id, { method: "GET" });
+      cache.match(key).then(async (hit) => {
+        if (!hit) { try { await resolveIcon(id, cache, key); } catch {} }
+        inflight--; next();
+      });
+    }
+  };
+  await next();
+}
 
+// shared by /icon and the pre-warm.
+//   1) canonical og:image off the paldb item page (authoritative; skips the
+//      per-page nav icons that made every unknown item resolve to a cleaver)
+//   2) direct CDN name guess for textures paldb has but doesn't index by slug
+//      (Sulfur, Coal, Quartz ...)
+//   3) 404 -> the app draws a letter tile
+async function resolveIcon(id, cache, key) {
   const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
-  let iconUrl = null;
+  const CDN = "https://cdn.paldb.cc/image/Others/InventoryItemIcon/Texture/T_itemicon_";
+
+  const asIcon = async (u) => {
+    try {
+      const img = await fetch(u, { cf: { cacheTtl: 604800, cacheEverything: true } });
+      const ct = img.headers.get("content-type") || "";
+      // the paldb CDN serves webp with an empty content-type, so trust img.ok and
+      // just reject an HTML/JSON error body served with a 200.
+      if (img.ok && !/text\/html|application\/json/i.test(ct)) {
+        return new Response(img.body, { status: 200, headers: {
+          "content-type": ct && /image\//i.test(ct) ? ct : "image/webp",
+          "cache-control": "public, max-age=1209600, immutable" } });
+      }
+    } catch { /* miss */ }
+    return null;
+  };
+
+  const getPage = async (cand) => {
+    const u = "https://paldb.cc/en/" + encodeURIComponent(cand);
+    const opt = { headers: { "user-agent": UA, "accept": "text/html", "accept-language": "en" }, cf: { cacheTtl: 86400, cacheEverything: true } };
+    let r = await fetch(u, opt);
+    if ((r.status === 429 || r.status === 503) ) { await new Promise((s) => setTimeout(s, 800)); r = await fetch(u, opt); }
+    return r;
+  };
+
+  let out = null;
+
   for (const cand of iconCandidates(id)) {
     try {
-      const page = await fetch("https://paldb.cc/en/" + encodeURIComponent(cand), {
-        headers: { "user-agent": UA, "accept": "text/html", "accept-language": "en" },
-        cf: { cacheTtl: 86400, cacheEverything: true },
-      });
+      const page = await getPage(cand);
       if (!page.ok) continue;
       const html = await page.text();
-      const m = html.match(/https:\/\/cdn\.paldb\.cc\/image\/[^"'\s)]+T_itemicon_[^"'\s)]+\.(?:webp|png)/i);
-      if (m) { iconUrl = m[0]; break; }
+      const m = html.match(/property=["']og:image["'][^>]*content=["']([^"']+)["']/i)
+             || html.match(/content=["']([^"']+)["'][^>]*property=["']og:image["']/i);
+      if (m && /T_itemicon_/i.test(m[1]) && !/unknown/i.test(m[1])) {
+        out = await asIcon(m[1]);
+        if (out) break;
+      }
     } catch { /* next candidate */ }
   }
 
-  let out;
-  if (iconUrl) {
-    try {
-      const img = await fetch(iconUrl, { cf: { cacheTtl: 604800 } });
-      if (img.ok) {
-        out = new Response(img.body, {
-          status: 200,
-          headers: {
-            "content-type": img.headers.get("content-type") || "image/webp",
-            "cache-control": "public, max-age=1209600, immutable",
-          },
-        });
-      }
-    } catch { /* fall through */ }
-  }
   if (!out) {
-    // 404 with NO image body -> the app's <img onerror> fires the lettered tile.
-    // short cache so a later alias fix (or paldb un-throttling) recovers on its own.
-    out = new Response("no icon", { status: 404, headers: { "content-type": "text/plain", "cache-control": "public, max-age=3600" } });
+    // paldb's texture names mirror the game's internal ids
+    // (T_itemicon_Material_CopperIngot, T_itemicon_Ammo_RifleBullet); the raw id
+    // is the best guess, the alias slug the runner-up.
+    const names = [...new Set([id, id.replace(/_\d+$/, ""), ICON_ALIAS[id]].filter(Boolean))];
+    outer: for (const n of names) {
+      for (const g of [`Material_${n}`, `Food_${n}`, `Consume_${n}`, `Ammo_${n}`, `Weapon_${n}`, `Armor_${n}`, n]) {
+        out = await asIcon(CDN + g + ".webp");
+        if (out) break outer;
+      }
+    }
   }
-  ctx.waitUntil(cache.put(key, out.clone()));
+
+  // cache a miss only briefly — paldb can 429 under a cold-start burst, and we
+  // want the next snapshot's warm pass to get another shot at it.
+  if (!out) out = new Response("no icon", { status: 404, headers: { "content-type": "text/plain", "cache-control": "public, max-age=600" } });
+  await cache.put(key, out.clone());
   return out;
+}
+
+async function iconProxy(rawId, request, ctx) {
+  const id = rawId.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
+  if (!id) return new Response("bad id", { status: 404, headers: { "content-type": "text/plain" } });
+  const cache = caches.default;
+  const key = new Request(new URL(request.url).origin + ICON_KEY + id, { method: "GET" });
+  return (await cache.match(key)) || resolveIcon(id, cache, key);
 }
 
 // ------------------------------------------------------------------ helpers
@@ -209,6 +260,9 @@ async function handleApi(request, env, ctx, url) {
     ]);
     const payload = { inventory, stations, state, rules, orders, fetchedAt: new Date().toISOString() };
     ctx.waitUntil(env.CACHE.put(cacheKey, JSON.stringify(payload), { expirationTtl: Math.max(ttl, 5) }));
+    // warm the icon cache for this snapshot's items so the stock tab paints fast.
+    // cache-aware + throttled, so after the first poll this is ~free.
+    ctx.waitUntil(warmIcons(inventory, new URL(request.url).origin, ctx));
     return json(payload);
   }
 

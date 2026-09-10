@@ -103,6 +103,9 @@ function show(tab) {
   localStorage.setItem(LS.tab, tab);
   VIEWS.forEach((t) => ($("#v-" + t).hidden = t !== tab));
   $$("#tabs button").forEach((b) => b.setAttribute("aria-selected", b.dataset.tab === tab));
+  // re-render on entry so lazy <img> observers attach while the section is visible
+  if (tab === "stock" && SNAP) renderStock();
+  if (tab === "order" && SNAP) renderOrder();
   if (tab === "rules") renderRules();
   window.scrollTo({ top: 0 });
 }
@@ -148,15 +151,41 @@ function closeSheet() {
 
 function slotEl(id, qty, opts = {}) {
   const s = el("div", { class: "slot" + (opts.noimg ? " noimg" : ""), "data-l": (nice(id)[0] || "?").toUpperCase() });
-  if (!opts.noimg) {
-    const img = el("img", { loading: "lazy", alt: "", src: iconUrl(id) });
-    const fail = () => { img.remove(); s.classList.add("noimg"); };
-    img.addEventListener("error", fail);
-    img.addEventListener("load", () => { if (img.naturalWidth <= 2) fail(); });
-    s.append(img);
-  }
+  if (!opts.noimg) s.append(iconImg(id, "big"));
   if (qty != null) s.append(el("span", { class: "qty" }, shortNum(qty)));
   return s;
+}
+
+// One <img> that always resolves to *something*: the real icon, or a letter tile.
+// The first-ever load is a cold proxy resolve (paldb scrape, ~1-4s each) and the
+// browser only runs ~6 in parallel, so a full cold grid can outlast any sane
+// watchdog. So: on a stall, retry once — by then the edge cache is warm and the
+// second try is instant — and only fall back to a letter tile if that fails too.
+function iconImg(id, kind) {
+  const attrs = kind === "mini"
+    ? { class: "ic", alt: "", src: iconUrl(id) }
+    : { decoding: "async", alt: "", src: iconUrl(id) };
+  const img = el("img", attrs);
+  let done = false, tries = 0;
+  const settle = () => { done = true; clearTimeout(wd); };
+  const fail = () => {
+    if (done) return; settle();
+    const host = img.parentElement; img.remove();
+    if (host) host.classList.add("noimg");
+  };
+  const ok = () => { if (img.naturalWidth <= 2) return retry(); settle(); };
+  const retry = () => {
+    if (done) return;
+    if (tries++ < 2) { img.src = iconUrl(id) + "?r=" + tries; arm(); }
+    else fail();
+  };
+  const arm = () => { clearTimeout(wd); wd = setTimeout(() => { if (!done && (!img.complete || img.naturalWidth <= 2)) retry(); }, 6000); };
+  let wd;
+  img.addEventListener("error", retry);
+  img.addEventListener("load", ok);
+  arm();
+  if (img.complete) ok();
+  return img;
 }
 
 function renderCatbar(counts) {
@@ -414,10 +443,23 @@ function renderStatus() {
   ]), "—");
 }
 function slotEl2(id) {
-  const img = el("img", { class: "ic", loading: "lazy", alt: "", src: iconUrl(id) });
-  const fail = () => img.replaceWith(el("span", { class: "ic", style: "display:grid;place-items:center;font:700 12px Oswald;color:var(--ink-3)" }, (nice(id)[0] || "?").toUpperCase()));
-  img.addEventListener("error", fail);
-  img.addEventListener("load", () => { if (img.naturalWidth <= 2) fail(); });
+  const img = el("img", { class: "ic", alt: "", src: iconUrl(id) });
+  let done = false, tries = 0, wd;
+  const settle = () => { done = true; clearTimeout(wd); };
+  const fail = () => {
+    if (done) return; settle();
+    img.replaceWith(el("span", { class: "ic", style: "display:grid;place-items:center;font:700 12px Oswald;color:var(--ink-3)" }, (nice(id)[0] || "?").toUpperCase()));
+  };
+  const retry = () => {
+    if (done) return;
+    if (tries++ < 2) { img.src = iconUrl(id) + "?r=" + tries; arm(); } else fail();
+  };
+  const ok = () => { if (img.naturalWidth <= 2) return retry(); settle(); };
+  const arm = () => { clearTimeout(wd); wd = setTimeout(() => { if (!done && (!img.complete || img.naturalWidth <= 2)) retry(); }, 6000); };
+  img.addEventListener("error", retry);
+  img.addEventListener("load", ok);
+  arm();
+  if (img.complete) ok();
   return img;
 }
 
