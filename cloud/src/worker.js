@@ -23,7 +23,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/icon/")) {
-      return iconProxy(url.pathname.slice("/icon/".length), request, ctx);
+      return iconProxy(url.pathname.slice("/icon/".length), request, env, ctx);
     }
     if (!url.pathname.startsWith("/api/")) {
       return env.ASSETS.fetch(request);
@@ -58,8 +58,9 @@ const ICON_ALIAS = {
   Honey: "Honey", Wheat: "Wheat", Egg: "Egg", Milk: "Milk", Flour: "Flour",
 };
 
-// bump the version segment to flush the edge cache after a resolver change
-const ICON_KEY = "/icon/v9/";
+// namespace for the per-colo edge-cache key (distinct from the real request URL
+// and from the KV key); the durable store is KV, keyed "icon:<id>".
+const ICON_KEY = "/icon/e1/";
 
 function iconCandidates(id) {
   const out = [];
@@ -72,34 +73,66 @@ function iconCandidates(id) {
   return out.slice(0, 4);
 }
 
-async function warmIcons(inventory, origin, ctx) {
+const ICON_TTL = "public, max-age=604800, stale-while-revalidate=86400";
+const txt404 = () => new Response("no icon", { status: 404, headers: { "content-type": "text/plain", "cache-control": "public, max-age=45" } });
+
+// Pre-resolve the icons for an inventory into KV so the grid never waits on a
+// cold paldb scrape. Gentle (2-wide) and only fills entries KV doesn't have.
+async function warmIcons(inventory, env, ctx) {
   const ids = Object.keys((inventory && inventory.totals) || {}).slice(0, 60);
-  const cache = caches.default;
   let inflight = 0, i = 0;
-  // keep it gentle — paldb 429s a burst, and a cached miss is retried on the
-  // next snapshot anyway (short 404 TTL).
-  const next = async () => {
+  const next = () => {
     while (i < ids.length && inflight < 2) {
       const id = ids[i++]; inflight++;
-      const key = new Request(origin + ICON_KEY + id, { method: "GET" });
-      cache.match(key).then(async (hit) => {
-        // retry misses too — the first pass often 429s a few, and the negative
-        // cache is short, so the next snapshot's pass mops them up.
-        if (!hit || !hit.ok) { try { await resolveIcon(id, cache, key); } catch {} }
+      env.CACHE.get("icon:" + id).then(async (have) => {
+        if (have === null) {
+          const r = await resolveIcon(id).catch(() => null);
+          if (r) await env.CACHE.put("icon:" + id, r.buf, { metadata: { ct: r.ct }, expirationTtl: 2592000 });
+        }
         inflight--; next();
       });
     }
   };
-  await next();
+  next();
 }
 
-// shared by /icon and the pre-warm.
+// GET /icon/[<epoch>/]<id>
+//   edge cache (per-colo)  ->  KV (durable, survives paldb throttling)  ->  scrape
+async function iconProxy(rawId, request, env, ctx) {
+  rawId = rawId.replace(/^[a-z]\d+\//i, "");        // ignore the cache-epoch segment
+  const id = rawId.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
+  if (!id) return txt404();
+
+  const cache = caches.default;
+  const cacheKey = new Request(new URL(request.url).origin + ICON_KEY + id, { method: "GET" });
+  const edge = await cache.match(cacheKey);
+  if (edge) return edge;
+
+  const serve = (buf, ct) => {
+    const res = new Response(buf, { headers: { "content-type": ct || "image/webp", "cache-control": ICON_TTL } });
+    ctx.waitUntil(cache.put(cacheKey, res.clone()));
+    return res;
+  };
+
+  const kv = await env.CACHE.getWithMetadata("icon:" + id, { type: "arrayBuffer" });
+  if (kv && kv.value && kv.value.byteLength) return serve(kv.value, kv.metadata && kv.metadata.ct);
+
+  const r = await resolveIcon(id).catch(() => null);
+  if (r) {
+    // 30d in KV — the durable copy that makes every other colo's hit instant
+    ctx.waitUntil(env.CACHE.put("icon:" + id, r.buf, { metadata: { ct: r.ct }, expirationTtl: 2592000 }));
+    return serve(r.buf, r.ct);
+  }
+  return txt404();       // transient failures heal via the short edge-negative + client retry
+}
+
+// Resolve an item id to icon bytes:
 //   1) canonical og:image off the paldb item page (authoritative; skips the
 //      per-page nav icons that made every unknown item resolve to a cleaver)
 //   2) direct CDN name guess for textures paldb has but doesn't index by slug
 //      (Sulfur, Coal, Quartz ...)
-//   3) 404 -> the app draws a letter tile
-async function resolveIcon(id, cache, key) {
+//   -> { buf, ct } | null
+async function resolveIcon(id) {
   const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
   const CDN = "https://cdn.paldb.cc/image/Others/InventoryItemIcon/Texture/T_itemicon_";
 
@@ -110,11 +143,7 @@ async function resolveIcon(id, cache, key) {
       // the paldb CDN serves webp with an empty content-type, so trust img.ok and
       // just reject an HTML/JSON error body served with a 200.
       if (img.ok && !/text\/html|application\/json/i.test(ct)) {
-        return new Response(img.body, { status: 200, headers: {
-          "content-type": ct && /image\//i.test(ct) ? ct : "image/webp",
-          // long-lived but revalidatable — never 'immutable', so a bad resolve
-          // can still be corrected without a namespace bump.
-          "cache-control": "public, max-age=604800, stale-while-revalidate=86400" } });
+        return { buf: await img.arrayBuffer(), ct: /image\//i.test(ct) ? ct : "image/webp" };
       }
     } catch { /* miss */ }
     return null;
@@ -124,11 +153,9 @@ async function resolveIcon(id, cache, key) {
     const u = "https://paldb.cc/en/" + encodeURIComponent(cand);
     const opt = { headers: { "user-agent": UA, "accept": "text/html", "accept-language": "en" }, cf: { cacheTtl: 86400, cacheEverything: true } };
     let r = await fetch(u, opt);
-    if ((r.status === 429 || r.status === 503) ) { await new Promise((s) => setTimeout(s, 800)); r = await fetch(u, opt); }
+    if (r.status === 429 || r.status === 503) { await new Promise((s) => setTimeout(s, 800)); r = await fetch(u, opt); }
     return r;
   };
-
-  let out = null;
 
   for (const cand of iconCandidates(id)) {
     try {
@@ -138,43 +165,23 @@ async function resolveIcon(id, cache, key) {
       const m = html.match(/property=["']og:image["'][^>]*content=["']([^"']+)["']/i)
              || html.match(/content=["']([^"']+)["'][^>]*property=["']og:image["']/i);
       if (m && /T_itemicon_/i.test(m[1]) && !/unknown/i.test(m[1])) {
-        out = await asIcon(m[1]);
-        if (out) break;
+        const got = await asIcon(m[1]);
+        if (got) return got;
       }
     } catch { /* next candidate */ }
   }
 
-  if (!out) {
-    // paldb's texture names mirror the game's internal ids
-    // (T_itemicon_Material_CopperIngot, T_itemicon_Ammo_RifleBullet); the raw id
-    // is the best guess, the alias slug the runner-up.
-    const names = [...new Set([id, id.replace(/_\d+$/, ""), ICON_ALIAS[id]].filter(Boolean))];
-    outer: for (const n of names) {
-      for (const g of [`Material_${n}`, `Food_${n}`, `Consume_${n}`, `Ammo_${n}`, `Weapon_${n}`, `Armor_${n}`, n]) {
-        out = await asIcon(CDN + g + ".webp");
-        if (out) break outer;
-      }
+  // paldb's texture names mirror the game's internal ids
+  // (T_itemicon_Material_CopperIngot, T_itemicon_Ammo_RifleBullet); the raw id
+  // is the best guess, the alias slug the runner-up.
+  const names = [...new Set([id, id.replace(/_\d+$/, ""), ICON_ALIAS[id]].filter(Boolean))];
+  for (const n of names) {
+    for (const g of [`Material_${n}`, `Food_${n}`, `Consume_${n}`, `Ammo_${n}`, `Weapon_${n}`, `Armor_${n}`, n]) {
+      const got = await asIcon(CDN + g + ".webp");
+      if (got) return got;
     }
   }
-
-  // cache a miss only very briefly — paldb 429s under a cold-start burst, so a
-  // miss is often transient; a short negative TTL lets the next request (or the
-  // next snapshot's warm pass) retry without hammering on every hit.
-  if (!out) out = new Response("no icon", { status: 404, headers: { "content-type": "text/plain", "cache-control": "public, max-age=45" } });
-  await cache.put(key, out.clone());
-  return out;
-}
-
-async function iconProxy(rawId, request, ctx) {
-  // path may carry a cache-epoch segment: /icon/<epoch>/<id>. It only exists to
-  // give the whole icon namespace a fresh URL when a bad resolve got pinned in
-  // the edge cache with immutable; we don't otherwise care about its value.
-  rawId = rawId.replace(/^[a-z]\d+\//i, "");
-  const id = rawId.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
-  if (!id) return new Response("bad id", { status: 404, headers: { "content-type": "text/plain" } });
-  const cache = caches.default;
-  const key = new Request(new URL(request.url).origin + ICON_KEY + id, { method: "GET" });
-  return (await cache.match(key)) || resolveIcon(id, cache, key);
+  return null;
 }
 
 // ------------------------------------------------------------------ helpers
@@ -269,9 +276,9 @@ async function handleApi(request, env, ctx, url) {
     ]);
     const payload = { inventory, stations, state, rules, orders, fetchedAt: new Date().toISOString() };
     ctx.waitUntil(env.CACHE.put(cacheKey, JSON.stringify(payload), { expirationTtl: Math.max(ttl, 5) }));
-    // warm the icon cache for this snapshot's items so the stock tab paints fast.
-    // cache-aware + throttled, so after the first poll this is ~free.
-    ctx.waitUntil(warmIcons(inventory, new URL(request.url).origin, ctx));
+    // warm the icon store for this snapshot's items so the stock tab paints fast.
+    // KV-aware + throttled, so after the first poll this is ~free.
+    ctx.waitUntil(warmIcons(inventory, env, ctx));
     return json(payload);
   }
 
