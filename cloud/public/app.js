@@ -341,12 +341,15 @@ function itemSheet(id, n) {
 
 // ------------------------------------------------------------------ order
 
-const ord = { recipe: null, target: "", count: 50, transport: true, cat: null };
+const ord = { recipe: null, target: "", count: 50, transport: true, cat: null, gear: false };
 let ordGridSig = "";
 // prefer the categories people actually bulk-craft as the landing view
 const ORD_CAT_PREF = ["Materiales", "Comida", "Munición", "Medicina", "Esferas", "Recursos"];
 // you don't bulk-craft schematics or skill fruits — keep them out of the order picker
 const ORD_SKIP = /^(Blueprint_|SkillCard_|WorkSuitability_AddTicket_|PalSummon_|PalEgg_)/i;
+// worth ordering in a batch — shown by default. Gear (Armas/Armadura/Accesorios/
+// Mejora/Otros) sits behind the "Equipo" toggle since you craft those one at a time.
+const ORD_BULK = new Set(["Recursos", "Materiales", "Comida", "Medicina", "Munición", "Esferas", "Varios"]);
 
 const mBusy = (s) => !!(s?.state?.workable || (s?.state?.requested || 0) > 0);
 const mState = (s) => mBusy(s) ? `${nice(s.state.recipe)} ×${s.state.remaining ?? "?"}` : "libre";
@@ -380,24 +383,33 @@ function renderOrder() {
   const ids = [...craft.keys()].filter((id) => !ORD_SKIP.test(id));
   if (ord.recipe && !craft.has(ord.recipe)) { ord.recipe = null; ord.target = ""; }
 
-  // category bar (same taxonomy as the stock tab)
+  // split: bulk (shown by default) vs gear (behind the "Equipo" toggle)
+  const catOfCache = new Map(ids.map((id) => [id, catOf(id)]));
+  const inScope = (id) => ord.gear || ORD_BULK.has(catOfCache.get(id));
   const counts = {};
-  for (const id of ids) { const c = catOf(id); counts[c] = (counts[c] || 0) + 1; }
+  for (const id of ids) if (inScope(id)) { const c = catOfCache.get(id); counts[c] = (counts[c] || 0) + 1; }
+  const gearCount = ids.filter((id) => !ORD_BULK.has(catOfCache.get(id))).length;
+
   if (ord.cat == null) ord.cat = ORD_CAT_PREF.find((c) => counts[c]) || "*";
   if (!(ord.cat === "*" || counts[ord.cat])) ord.cat = "*";
+
   const cb = $("#ordCats"); cb.innerHTML = "";
-  const catBtn = (key, label, n) => cb.append(el("button", {
-    "aria-current": ord.cat === key,
+  const catBtn = (key, label, n, extra) => cb.append(el("button", {
+    "aria-current": ord.cat === key, class: extra || null,
     onclick: () => { ord.cat = key; renderOrder(); },
-  }, [label, el("span", { class: "c" }, n)]));
-  catBtn("*", "Todo", ids.length);
+  }, [label, n != null ? el("span", { class: "c" }, n) : null]));
+  catBtn("*", "Todo", Object.values(counts).reduce((a, b) => a + b, 0));
   for (const c of CAT_ORDER) if (counts[c]) catBtn(c, c, counts[c]);
+  if (gearCount) cb.append(el("button", {
+    class: "gear" + (ord.gear ? " on" : ""),
+    onclick: () => { ord.gear = !ord.gear; if (!ord.gear && !ORD_BULK.has(ord.cat)) ord.cat = "*"; renderOrder(); },
+  }, ord.gear ? "− equipo" : `+ equipo ${gearCount}`));
 
   const q = ($("#ordSearch")?.value || "").toLowerCase().trim();
-  const catRank = (id) => { const i = CAT_ORDER.indexOf(catOf(id)); return i < 0 ? 99 : i; };
+  const catRank = (id) => { const i = CAT_ORDER.indexOf(catOfCache.get(id)); return i < 0 ? 99 : i; };
   const matches = ids
     .filter((id) => q ? (id.toLowerCase().includes(q) || nice(id).toLowerCase().includes(q))
-                      : (ord.cat === "*" || catOf(id) === ord.cat))
+                      : (inScope(id) && (ord.cat === "*" || catOfCache.get(id) === ord.cat)))
     .sort((a, b) => (q || ord.cat !== "*" ? 0 : catRank(a) - catRank(b)) || nice(a).localeCompare(nice(b)));
   const CAP = 120;
   const shown = matches.slice(0, CAP);
@@ -416,7 +428,8 @@ function renderOrder() {
     if (overflow > 0) g.append(el("div", { class: "empty", style: "grid-column:1/-1;padding:14px 6px" }, `+${overflow} más — usá el buscador`));
   }
 
-  $("#ordPick").textContent = ord.recipe ? nice(ord.recipe) : (ids.length ? `${ids.length} recetas` : "");
+  const scopeN = ids.filter(inScope).length;
+  $("#ordPick").textContent = ord.recipe ? nice(ord.recipe) : (scopeN ? `${scopeN} recetas` : "");
   $("#ordConfig").hidden = !ord.recipe;
   $("#ordCount").value = ord.count;
   $("#ordTransport").checked = ord.transport;
