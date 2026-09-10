@@ -59,7 +59,7 @@ const ICON_ALIAS = {
 };
 
 // bump the version segment to flush the edge cache after a resolver change
-const ICON_KEY = "/icon/v8/";
+const ICON_KEY = "/icon/v9/";
 
 function iconCandidates(id) {
   const out = [];
@@ -83,7 +83,9 @@ async function warmIcons(inventory, origin, ctx) {
       const id = ids[i++]; inflight++;
       const key = new Request(origin + ICON_KEY + id, { method: "GET" });
       cache.match(key).then(async (hit) => {
-        if (!hit) { try { await resolveIcon(id, cache, key); } catch {} }
+        // retry misses too — the first pass often 429s a few, and the negative
+        // cache is short, so the next snapshot's pass mops them up.
+        if (!hit || !hit.ok) { try { await resolveIcon(id, cache, key); } catch {} }
         inflight--; next();
       });
     }
@@ -110,7 +112,9 @@ async function resolveIcon(id, cache, key) {
       if (img.ok && !/text\/html|application\/json/i.test(ct)) {
         return new Response(img.body, { status: 200, headers: {
           "content-type": ct && /image\//i.test(ct) ? ct : "image/webp",
-          "cache-control": "public, max-age=1209600, immutable" } });
+          // long-lived but revalidatable — never 'immutable', so a bad resolve
+          // can still be corrected without a namespace bump.
+          "cache-control": "public, max-age=604800, stale-while-revalidate=86400" } });
       }
     } catch { /* miss */ }
     return null;
@@ -153,14 +157,19 @@ async function resolveIcon(id, cache, key) {
     }
   }
 
-  // cache a miss only briefly — paldb can 429 under a cold-start burst, and we
-  // want the next snapshot's warm pass to get another shot at it.
-  if (!out) out = new Response("no icon", { status: 404, headers: { "content-type": "text/plain", "cache-control": "public, max-age=600" } });
+  // cache a miss only very briefly — paldb 429s under a cold-start burst, so a
+  // miss is often transient; a short negative TTL lets the next request (or the
+  // next snapshot's warm pass) retry without hammering on every hit.
+  if (!out) out = new Response("no icon", { status: 404, headers: { "content-type": "text/plain", "cache-control": "public, max-age=45" } });
   await cache.put(key, out.clone());
   return out;
 }
 
 async function iconProxy(rawId, request, ctx) {
+  // path may carry a cache-epoch segment: /icon/<epoch>/<id>. It only exists to
+  // give the whole icon namespace a fresh URL when a bad resolve got pinned in
+  // the edge cache with immutable; we don't otherwise care about its value.
+  rawId = rawId.replace(/^[a-z]\d+\//i, "");
   const id = rawId.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
   if (!id) return new Response("bad id", { status: 404, headers: { "content-type": "text/plain" } });
   const cache = caches.default;
