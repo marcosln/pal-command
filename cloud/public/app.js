@@ -519,11 +519,19 @@ $("#cfgSave").addEventListener("click", async () => {
   cfg.url = url; cfg.token = token; cfg.demo = false;
   const btn = $("#cfgSave"); btn.disabled = true; btn.textContent = "Conectando…";
   try {
+    const h = await api("/api/health?probe=1");
+    const miss = ["appToken", "dathostUser", "dathostKey"].filter((k) => !h.config?.[k]);
+    if (miss.length) throw new Error("Al Worker le faltan secrets: " + miss.join(", "));
+    if (!h.tokenOk) throw new Error("Ese token no coincide con el APP_TOKEN del Worker.");
+    if (typeof h.dathost === "string" && h.dathost.startsWith("FAIL")) {
+      throw new Error("DatHost rechazó la conexión (" + h.dathost.replace("FAIL: ", "") +
+        "). Revisá el email/contraseña de los secrets.");
+    }
     await api("/api/snapshot");
     localStorage.setItem(LS.url, url); localStorage.setItem(LS.token, token);
     gotoApp();
   } catch (e) {
-    $("#cfgErr").textContent = "No conecta: " + e.message; $("#cfgErr").hidden = false;
+    $("#cfgErr").textContent = e.message; $("#cfgErr").hidden = false;
   }
   btn.disabled = false; btn.textContent = "Conectar";
 });

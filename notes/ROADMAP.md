@@ -130,14 +130,35 @@ Code: rules.lua `M.evaluate` + main.lua `apply_rules` / `inflight_for`. Deploy 8
   Only the Worker's data source changes A→B (DatHost API → KV by token) + the mod
   gains push. The PWA barely changes.
 
-- [ ] 4.1 Multi-tenant Worker: per-user record (host+id+key OR serverToken) in KV; `APP_TOKEN` becomes a per-user thing
-- [ ] 4.2 `wrangler kv namespace create` → fill `cloud/wrangler.toml`; `wrangler deploy`
-- [ ] 4.3 Test /api/snapshot /orders /rules /health (both connection paths)
-- [ ] 4.4 Mod → Worker push: outbound HTTPS from the mod (bridge or FHttpModule); config WorkerBaseUrl+ServerToken
-- [ ] 4.5 PWA points at the live Worker; inventory view real
-- [ ] 4.6 PWA order flow: create → shows "placed" from state.json
-- [ ] 4.7 PWA rules editor
-- [ ] 4.8 Onboarding: "connect your server" — pick path, paste key/token, verify, done. One time.
+- [~] 4.1 Multi-tenant Worker — DEFERRED to Path B / Stage 5. Path A worker is single-tenant.
+- [x] 4.2 `wrangler kv namespace create` → `cloud/wrangler.toml` → `wrangler deploy`
+      <!-- done 2026-09-10: KV id d333d66e98c842b298584ec8c8923348. Live at
+      https://pal-command.leonnm04.workers.dev. All 4 secrets set by the user
+      (APP_TOKEN, DATHOST_USER, DATHOST_KEY) — /api/health?probe=1 confirms
+      config{appToken,dathostUser,dathostKey}=true. `npx wrangler deploy` is run
+      from this session (user's wrangler token cached on the machine). -->
+- [~] 4.3 API test — /api/health + probe DONE. /api/snapshot|orders|rules against
+      **real DatHost** still UNVERIFIED — needs the user's phone + APP_TOKEN once
+      (I have no token/creds). `/api/health?probe=1` now does a live DatHost read
+      and reports ok / "no inventory.json yet" / "FAIL: <status>".
+- [ ] 4.4 Mod → Worker push (Path B) — DEFERRED to Stage 5.
+- [x] 4.5 PWA points at the live Worker; inventory view real
+      <!-- code done + deployed. `api()` -> cfg.url + Bearer cfg.token. Needs the
+      one live check with real creds (4.3). -->
+- [x] 4.6 PWA order flow: create → shows "placed"/"queue" from state.json (Turno tab). Code done, live-check pending.
+- [x] 4.7 PWA rules editor (Reglas tab: gauge + min/target/batch/maxInProgress, PUT /api/rules). Code done, live-check pending.
+- [~] 4.8 Onboarding: setup view (paste Worker URL + APP_TOKEN → `/api/health?probe=1`
+      → clear diagnostic: missing secrets / wrong token / DatHost rejected / ok).
+      The "app uploads the mod via the host API" automation is NOT built (Stage 5).
+
+**PWA redesign 2026-09-10** (commits 73db800..bcb343f9): full rebuild —
+dark ops-console, category grid of real item photos with the qty overlaid,
+bottom sheets, machine chips, rule gauges, no pinch-zoom. Item icons proxied
+from paldb.cc via /icon/b1/<id>: og:image resolution (no more wrong icons) +
+CDN name-guess fallback + **KV-backed durable store** (first resolve anywhere →
+30d in KV → every colo instant, survives paldb rate-limiting). Letter tile is
+the default so a slot is never blank. ~90% icon coverage; genuine misses
+(skill cards, removed items) stay as clean letter tiles.
       The hard part isn't the token — it's getting the mod ONTO the server:
       * DatHost (+ API key): near-zero-touch — the app can toggle UE4SS on and
         upload the PalCommand mod folder itself via the API, then configure it.

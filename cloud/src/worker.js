@@ -249,7 +249,26 @@ async function handleApi(request, env, ctx, url) {
   const path = url.pathname.replace(/^\/api\//, "");
 
   if (path === "health") {
-    return json({ ok: true, server: env.DATHOST_SERVER_ID ? "configured" : "missing", now: new Date().toISOString() });
+    const cfg = {
+      serverId: !!env.DATHOST_SERVER_ID,
+      appToken: !!env.APP_TOKEN,
+      dathostUser: !!env.DATHOST_USER,
+      dathostKey: !!env.DATHOST_KEY,
+    };
+    const tokenOk = authorized(request, env);
+    const out = { ok: true, config: cfg, tokenOk, now: new Date().toISOString() };
+    // ?probe=1 with a valid token actually hits DatHost and reports what came back
+    if (url.searchParams.get("probe") && tokenOk) {
+      try {
+        const dh = dathost(env);
+        await dh.mountOverlay();
+        const inv = await dh.readFile("inventory.json");
+        out.dathost = inv == null ? "connected, no inventory.json yet" : `ok, inventory.json ${inv.length} bytes`;
+      } catch (e) {
+        out.dathost = "FAIL: " + String(e && e.message || e);
+      }
+    }
+    return json(out);
   }
 
   if (!authorized(request, env)) {
