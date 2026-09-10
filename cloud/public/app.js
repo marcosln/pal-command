@@ -48,9 +48,47 @@ const NAMES = {
   ElectricOrgan: "Órgano eléctrico", FireOrgan: "Llama ardiente", IceOrgan: "Cubito de hielo", bone: "Hueso",
   RainbowCrystal: "Cristal arcoíris", PalCrystal_Ex: "Cristal Pal grande", MeteorDrop: "Fragmento de meteorito",
   AncientParts3: "Pieza de tecnología antigua", Diamond: "Diamante", Ruby: "Rubí", Sapphire: "Zafiro",
+  Medicines: "Suministros médicos", LuxuryMedicines: "Suministros médicos de alta calidad", Herbs: "Hierbas medicinales",
+  PalFluid: "Fluido Pal", PalOil: "Aceite Pal de alta calidad", CrudeOil: "Petróleo crudo", Cement: "Cemento",
+  Horn: "Cuerno", Venom: "Glándula venenosa", Poppy: "Amapola", NightStone: "Piedra nocturna",
+  PredatorCrystal: "Cristal depredador", BeastBone_Ancient: "Hueso de bestia antiguo",
+  PalUpgradeStone: "Piedra de estatua ancestral", GunPowder2: "Pólvora", CarbonFiber: "Fibra de carbono",
 };
 const nice = (id) => NAMES[id] || String(id || "")
   .replace(/^Pal_|^Blueprint_|^SkillCard_/, "").replace(/_/g, " ").replace(/\b\w/g, (m) => m);
+
+// ---- bases: Palworld shows an un-renamed base as a locale template string
+// ("新規生成拠点テンプレート名1(仮)"). Number them 1..N by size and label in Spanish.
+const BASE_TEMPLATE = /新規生成拠点|拠点テンプレート|base\s*template\s*name|nouvelle\s*base|neue\s*basis/i;
+let baseNames = {};
+function rebuildBaseNames(inv) {
+  baseNames = {};
+  [...(inv?.bases || [])]
+    .sort((a, b) => (b.containers?.length || 0) - (a.containers?.length || 0))
+    .forEach((b, i) => { if (b.id) baseNames[b.id] = "Base " + (i + 1); });
+}
+function baseLabel(id, rawName) {
+  if (id && baseNames[id]) return baseNames[id];
+  const s = String(rawName ?? id ?? "").trim();
+  if (!s) return "Base";
+  if (BASE_TEMPLATE.test(s)) { const n = s.match(/(\d+)/); return "Base" + (n ? " " + n[1] : ""); }
+  return s;
+}
+
+// ---- machines: internal BP class -> Spanish
+const MACHINES = [
+  [/BlastFurnace/i, "Horno"], [/IceCrusher/i, "Trituradora de hielo"], [/Crusher/i, "Trituradora"],
+  [/FlourMill/i, "Molino"], [/WorkBench_SkillUnlock/i, "Mesa de tecnología"], [/CompositeDesk/i, "Mesa de montaje"],
+  [/WorkBench/i, "Mesa de trabajo"], [/ElectricKitchen/i, "Cocina eléctrica"], [/HugeKitchen/i, "Cocina grande"],
+  [/CookingStove/i, "Fogón"], [/CampFire/i, "Hoguera"], [/MedicineFacility/i, "Fábrica de medicina"],
+  [/WeaponFactory/i, "Fábrica de armas"], [/SphereFactory/i, "Fábrica de esferas"], [/Factory_Hard/i, "Línea de producción"],
+  [/ProductionLine|AssemblyLine/i, "Línea de producción"], [/Ranch/i, "Rancho"], [/Mining/i, "Mina"],
+];
+function machineName(bp) {
+  const s = String(bp || "");
+  for (const [rx, es] of MACHINES) if (rx.test(s)) return es;
+  return s.replace(/^BP_BuildObject_|_C$/g, "").replace(/_/g, " ").trim() || "Máquina";
+}
 
 const CATS = [
   ["Recursos",   /^(Stone|Wood|Wood_|Fiber|Leather|Wool|Cloth|Sulfur|Quartz|Coal|CrudeOil|PalFluid|PalOil|bone|Horn|Pal_crystal|RainbowCrystal|PalCrystal|MeteorDrop|Diamond|Ruby|Sapphire|Eemerald|Emerald|CaveMushroom|Venom|Poppy|Wheat|BeastBone|ElectricOrgan|FireOrgan|IceOrgan|Chromium|ManganeseOre|CopperOre|IronOre)/i],
@@ -265,9 +303,10 @@ function itemSheet(id, n) {
   for (const base of inv?.bases || []) {
     let c = 0;
     for (const ct of base.containers || []) c += (ct.items || {})[id] || 0;
-    if (c) where.push([base.name, c]);
+    if (c) where.push([baseLabel(base.id, base.name), c]);
   }
   if (inv?.guildChest?.items?.[id]) where.push(["Cofre de gremio", inv.guildChest.items[id]]);
+  where.sort((a, b) => b[1] - a[1]);
 
   const canMake = (SNAP?.stations?.stations || []).some((s) => (s.recipes || []).includes(id));
   const body = [
@@ -291,8 +330,7 @@ function itemSheet(id, n) {
 // ------------------------------------------------------------------ order
 
 function mLabel(s) {
-  const t = String(s.machineType || "").replace(/^BP_BuildObject_|_C$/g, "").replace(/_/g, " ");
-  return `${s.baseName} · ${t}`;
+  return `${baseLabel(s.baseId, s.baseName)} · ${machineName(s.machineType)}`;
 }
 function mState(s) {
   const st = s.state || {};
@@ -320,7 +358,7 @@ function renderOrder() {
   const recipes = new Map();
   for (const s of st?.stations || []) for (const r of s.recipes || []) {
     if (!recipes.has(r)) recipes.set(r, new Set());
-    recipes.get(r).add(s.baseName);
+    recipes.get(r).add(baseLabel(s.baseId, s.baseName));
   }
   const cur = sel.value;
   sel.innerHTML = "";
@@ -346,8 +384,8 @@ function renderOrder() {
         toast(`Fijado: ${mLabel(s)}`);
       },
     }, [
-      el("span", { class: "t" }, mLabel(s).split(" · ")[1] || "?"),
-      el("span", { class: "s" }, `${mLabel(s).split(" · ")[0]} — ${mState(s)}`),
+      el("span", { class: "t" }, machineName(s.machineType)),
+      el("span", { class: "s" }, `${baseLabel(s.baseId, s.baseName)} — ${mState(s)}`),
     ]));
   }
   if (!list.length) fg.append(el("div", { class: "empty", style: "grid-column:1/-1" }, "Sin estaciones."));
@@ -474,6 +512,7 @@ function renderAll() {
 async function refresh(opts = {}) {
   try {
     SNAP = await api("/api/snapshot" + (opts.fresh ? "?fresh=1" : ""));
+    rebuildBaseNames(SNAP?.inventory);
     if ($("#rulesSave").hidden) rulesDraft = null;
     renderAll();
   } catch (e) {
