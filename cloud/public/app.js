@@ -56,7 +56,11 @@ const NAMES = {
   PalUpgradeStone: "Piedra de estatua ancestral", GunPowder2: "Pólvora", CarbonFiber: "Fibra de carbono",
 };
 const nice = (id) => NAMES[id] || String(id || "")
-  .replace(/^Pal_|^Blueprint_|^SkillCard_/, "").replace(/_/g, " ").replace(/\b\w/g, (m) => m);
+  .replace(/^Pal_|^Blueprint_|^SkillCard_/, "")
+  .replace(/_/g, " ")
+  .replace(/([a-z])([A-Z])/g, "$1 $2")     // camelCase -> spaced
+  .replace(/([A-Za-z]) ?(\d)/g, "$1 $2")   // trailing tier number
+  .replace(/\s+/g, " ").trim();
 
 // ---- bases: Palworld shows an un-renamed base as a locale template string
 // ("新規生成拠点テンプレート名1(仮)"). Number them 1..N by size and label in Spanish.
@@ -325,73 +329,133 @@ function itemSheet(id, n) {
   ];
   if (canMake) body.push(el("button", {
     class: "btn wide", style: "margin-top:14px",
-    onclick: () => { closeSheet(); show("order"); const sel = $("#ordRecipe"); if ([...sel.options].some((o) => o.value === id)) { sel.value = id; renderMachines(); } },
+    onclick: () => { closeSheet(); ord.recipe = id; ord.target = ""; show("order"); },
   }, "Craftear esto"));
   openSheet(body);
 }
 
 // ------------------------------------------------------------------ order
 
-function mLabel(s) {
-  return `${baseLabel(s.baseId, s.baseName)} · ${machineName(s.machineType)}`;
-}
-function mState(s) {
-  const st = s.state || {};
-  const busy = st.workable || (st.requested || 0) > 0;
-  return busy ? `${nice(st.recipe)} ×${st.remaining}` : "libre";
+const ord = { recipe: null, target: "", count: 50, transport: true, cat: null };
+let ordGridSig = "";
+// prefer the categories people actually bulk-craft as the landing view
+const ORD_CAT_PREF = ["Materiales", "Comida", "Munición", "Medicina", "Esferas", "Recursos"];
+// you don't bulk-craft schematics or skill fruits — keep them out of the order picker
+const ORD_SKIP = /^(Blueprint_|SkillCard_|WorkSuitability_AddTicket_|PalSummon_|PalEgg_)/i;
+
+const mBusy = (s) => !!(s?.state?.workable || (s?.state?.requested || 0) > 0);
+const mState = (s) => mBusy(s) ? `${nice(s.state.recipe)} ×${s.state.remaining ?? "?"}` : "libre";
+const mFull = (s) => `${machineName(s.machineType)} · ${baseLabel(s.baseId, s.baseName)}`;
+
+function craftMap() {
+  const m = new Map();                    // recipe id -> [stations]
+  for (const s of SNAP?.stations?.stations || [])
+    for (const r of s.recipes || []) (m.get(r) || m.set(r, []).get(r)).push(s);
+  return m;
 }
 
-function renderMachines() {
-  const sel = $("#ordMachine");
-  const recipe = $("#ordRecipe").value;
-  const forRecipe = (SNAP?.stations?.stations || []).filter((s) => (s.recipes || []).includes(recipe));
-  const cur = sel.value;
-  sel.innerHTML = "";
-  sel.append(el("option", { value: "" }, "▸ Cualquier máquina libre"));
-  forRecipe.slice().sort((a, b) => (a.baseName + a.machineType).localeCompare(b.baseName + b.machineType))
-    .forEach((s) => s.mapId && sel.append(el("option", { value: s.mapId }, `${mLabel(s)} — ${mState(s)}`)));
-  if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
+const stepFor = (n) => (n >= 500 ? 100 : n >= 100 ? 25 : n >= 20 ? 10 : 1);
+function setCount(n) {
+  ord.count = Math.max(1, Math.min(99999, Math.floor(Number(String(n).replace(/\D/g, "")) || 1)));
+  const f = $("#ordCount"); if (f) f.value = ord.count;
+  syncGo();
+}
+
+function syncGo() {
+  const go = $("#ordGo");
+  if (!ord.recipe) { go.hidden = true; return; }
+  go.hidden = false;
+  const where = ord.target ? mFull((SNAP?.stations?.stations || []).find((x) => x.mapId === ord.target) || {}) : "cualquier máquina libre";
+  go.innerHTML = "";
+  go.append(document.createTextNode(`Pedir · ${nice(ord.recipe)} ×${ord.count}`), el("small", {}, "→ " + where));
 }
 
 function renderOrder() {
-  const st = SNAP?.stations;
-  const sel = $("#ordRecipe");
-  $("#floorCount").textContent = st ? `${st.stations?.length ?? 0} máquinas` : "";
+  const craft = craftMap();
+  const ids = [...craft.keys()].filter((id) => !ORD_SKIP.test(id));
+  if (ord.recipe && !craft.has(ord.recipe)) { ord.recipe = null; ord.target = ""; }
 
-  const recipes = new Map();
-  for (const s of st?.stations || []) for (const r of s.recipes || []) {
-    if (!recipes.has(r)) recipes.set(r, new Set());
-    recipes.get(r).add(baseLabel(s.baseId, s.baseName));
-  }
-  const cur = sel.value;
-  sel.innerHTML = "";
-  [...recipes.keys()].sort((a, b) => nice(a).localeCompare(nice(b)))
-    .forEach((id) => sel.append(el("option", { value: id }, nice(id))));
-  if (cur && recipes.has(cur)) sel.value = cur;
-  renderMachines();
-  $("#ordHint").textContent = recipes.size ? "Máquina fija = espera si está ocupada. “Cualquiera” = la primera libre." : "";
+  // category bar (same taxonomy as the stock tab)
+  const counts = {};
+  for (const id of ids) { const c = catOf(id); counts[c] = (counts[c] || 0) + 1; }
+  if (ord.cat == null) ord.cat = ORD_CAT_PREF.find((c) => counts[c]) || "*";
+  if (!(ord.cat === "*" || counts[ord.cat])) ord.cat = "*";
+  const cb = $("#ordCats"); cb.innerHTML = "";
+  const catBtn = (key, label, n) => cb.append(el("button", {
+    "aria-current": ord.cat === key,
+    onclick: () => { ord.cat = key; renderOrder(); },
+  }, [label, el("span", { class: "c" }, n)]));
+  catBtn("*", "Todo", ids.length);
+  for (const c of CAT_ORDER) if (counts[c]) catBtn(c, c, counts[c]);
 
-  const fg = $("#floorGrid");
-  fg.innerHTML = "";
-  const list = (st?.stations || []).slice().sort((a, b) => (b.state?.workable ? 1 : 0) - (a.state?.workable ? 1 : 0));
-  for (const s of list) {
-    const busy = s.state?.workable || (s.state?.requested || 0) > 0;
-    fg.append(el("button", {
-      class: "mch" + (busy ? " run" : ""),
-      onclick: () => {
-        show("order");
-        const has = (s.recipes || [])[0];
-        if (has && [...sel.options].some((o) => o.value === has)) sel.value = has;
-        renderMachines();
-        if (s.mapId) $("#ordMachine").value = s.mapId;
-        toast(`Fijado: ${mLabel(s)}`);
-      },
-    }, [
-      el("span", { class: "t" }, machineName(s.machineType)),
-      el("span", { class: "s" }, `${baseLabel(s.baseId, s.baseName)} — ${mState(s)}`),
-    ]));
+  const q = ($("#ordSearch")?.value || "").toLowerCase().trim();
+  const catRank = (id) => { const i = CAT_ORDER.indexOf(catOf(id)); return i < 0 ? 99 : i; };
+  const matches = ids
+    .filter((id) => q ? (id.toLowerCase().includes(q) || nice(id).toLowerCase().includes(q))
+                      : (ord.cat === "*" || catOf(id) === ord.cat))
+    .sort((a, b) => (q || ord.cat !== "*" ? 0 : catRank(a) - catRank(b)) || nice(a).localeCompare(nice(b)));
+  const CAP = 120;
+  const shown = matches.slice(0, CAP);
+  const overflow = matches.length - shown.length;
+
+  // recipe grid — rebuild only when the set or selection changes (keeps scroll on polls)
+  const sig = shown.join("|") + "»" + ord.recipe + "»" + overflow;
+  if (sig !== ordGridSig) {
+    ordGridSig = sig;
+    const g = $("#ordRecipes"); g.innerHTML = "";
+    if (!shown.length) g.append(el("div", { class: "empty", style: "grid-column:1/-1" }, ids.length ? "Nada coincide." : "Sin máquinas."));
+    shown.forEach((id, i) => g.append(el("button", {
+      class: "rtile", "aria-pressed": ord.recipe === id, style: `animation-delay:${Math.min(i * 8, 180)}ms`,
+      onclick: () => { ord.recipe = ord.recipe === id ? null : id; ord.target = ""; renderOrder(); if (ord.recipe) $("#ordConfig")?.scrollIntoView({ behavior: "smooth", block: "start" }); },
+    }, [slotEl(id, null), el("div", { class: "lbl" }, nice(id))])));
+    if (overflow > 0) g.append(el("div", { class: "empty", style: "grid-column:1/-1;padding:14px 6px" }, `+${overflow} más — usá el buscador`));
   }
-  if (!list.length) fg.append(el("div", { class: "empty", style: "grid-column:1/-1" }, "Sin estaciones."));
+
+  $("#ordPick").textContent = ord.recipe ? nice(ord.recipe) : (ids.length ? `${ids.length} recetas` : "");
+  $("#ordConfig").hidden = !ord.recipe;
+  $("#ordCount").value = ord.count;
+  $("#ordTransport").checked = ord.transport;
+
+  renderShop(craft);
+  syncGo();
+}
+
+function renderShop(craft) {
+  const all = (SNAP?.stations?.stations || []).slice();
+  $("#floorCount").textContent = all.length ? `${all.length} máquinas` : "";
+  const fg = $("#floorGrid"); fg.innerHTML = "";
+
+  const card = (s, dim) => el("button", {
+    class: "mcard " + (mBusy(s) ? "busy" : "free") + (dim ? " dim" : ""),
+    "aria-pressed": ord.target === s.mapId,
+    onclick: () => {
+      if (dim) { toast(`${machineName(s.machineType)} no hace ${nice(ord.recipe)}`, true); return; }
+      ord.target = ord.target === s.mapId ? "" : s.mapId;
+      if (!ord.recipe) ord.recipe = (s.recipes || [])[0] || null;
+      renderOrder();
+    },
+  }, [
+    el("div", {}, [el("div", { class: "mt" }, machineName(s.machineType)), el("div", { class: "mb" }, baseLabel(s.baseId, s.baseName))]),
+    el("span", { class: "mstate" }, mState(s)),
+  ]);
+
+  if (!ord.recipe) {
+    $("#ordHint").textContent = all.length ? "Tocá una máquina para empezar por ahí, o elegí una receta arriba." : "";
+    all.sort((a, b) => (mBusy(a) ? 1 : 0) - (mBusy(b) ? 1 : 0)).forEach((s) => fg.append(card(s, false)));
+    return;
+  }
+
+  const cap = new Set((craft.get(ord.recipe) || []).map((s) => s.mapId));
+  $("#ordHint").textContent = "“Cualquiera” toma la primera libre. Una máquina fija espera su turno si está ocupada.";
+  fg.append(el("button", {
+    class: "any", "aria-pressed": !ord.target,
+    onclick: () => { ord.target = ""; renderOrder(); },
+  }, [el("span", {}, "▸ Cualquier máquina libre"), el("span", { class: "tag" }, `${cap.size} pueden`)]));
+
+  const yes = all.filter((s) => cap.has(s.mapId)).sort((a, b) => (mBusy(a) ? 1 : 0) - (mBusy(b) ? 1 : 0));
+  const no = all.filter((s) => !cap.has(s.mapId));
+  if (yes.length) { fg.append(el("div", { class: "mdiv" }, "que lo pueden hacer")); yes.forEach((s) => fg.append(card(s, false))); }
+  if (no.length) { fg.append(el("div", { class: "mdiv" }, "otras")); no.forEach((s) => fg.append(card(s, true))); }
 }
 
 // ------------------------------------------------------------------ rules
@@ -551,14 +615,14 @@ async function forceRefresh() {
 }
 
 async function order() {
-  const recipe = $("#ordRecipe").value;
-  const count = Math.max(1, Math.floor(Number($("#ordCount").value) || 0));
-  const target = $("#ordMachine").value || undefined;
-  if (!recipe || !count) return;
+  setCount($("#ordCount").value);
+  if (!ord.recipe || !ord.count) return;
+  const { recipe, count } = ord;
   $("#ordGo").disabled = true;
   try {
-    await api("/api/orders", { method: "POST", body: JSON.stringify({ recipe, count, target, transport: $("#ordTransport").checked }) });
+    await api("/api/orders", { method: "POST", body: JSON.stringify({ recipe, count, target: ord.target || undefined, transport: ord.transport }) });
     toast(`En cola: ${nice(recipe)} ×${count}`);
+    ord.target = "";
     await refresh({ fresh: true });
   } catch (e) { toast(e.message, true); }
   $("#ordGo").disabled = false;
@@ -620,7 +684,17 @@ $("#cfgSave").addEventListener("click", async () => {
 $("#cfgDemo").addEventListener("click", () => { cfg.demo = true; gotoApp(); toast("Demo con datos de ejemplo"); });
 $("#forget").addEventListener("click", () => { localStorage.clear(); location.reload(); });
 $("#ordGo").addEventListener("click", order);
-$("#ordRecipe").addEventListener("change", renderMachines);
+$("#ordSearch").addEventListener("input", renderOrder);
+$("#qMinus").addEventListener("click", () => setCount(ord.count - stepFor(ord.count)));
+$("#qPlus").addEventListener("click", () => setCount(ord.count + stepFor(ord.count)));
+$("#ordCount").addEventListener("input", (e) => { const n = parseInt(e.target.value.replace(/\D/g, ""), 10); if (!isNaN(n)) { ord.count = Math.min(99999, n); syncGo(); } });
+$("#ordCount").addEventListener("blur", () => setCount($("#ordCount").value));
+$("#ordTransport").addEventListener("change", (e) => { ord.transport = e.target.checked; });
+$("#qChips").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.reset != null) setCount(1);
+  else if (b.dataset.add) setCount(ord.count + Number(b.dataset.add));
+});
 $("#rulesSave").addEventListener("click", saveRules);
 $("#ruleAdd").addEventListener("click", () => { (rulesDraft ||= []).push({ item: "", min: 0, target: 0, enabled: true }); renderRules(); $("#rulesSave").hidden = false; });
 $("#q").addEventListener("input", renderStock);
