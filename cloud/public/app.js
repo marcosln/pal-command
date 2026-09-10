@@ -95,27 +95,32 @@ function machineName(bp) {
   return s.replace(/^BP_BuildObject_|_C$/g, "").replace(/_/g, " ").trim() || "Máquina";
 }
 
+// Checked in order — specific families (gear, consumables, blueprints) win over
+// the generic Recursos/Materiales catch-alls, so "ClothArmor" lands in Armadura,
+// not Recursos. Display order is CAT_ORDER below, which is different on purpose.
 const CATS = [
-  ["Recursos",   /^(Stone|Wood|Wood_|Fiber|Leather|Wool|Cloth|Sulfur|Quartz|Coal|CrudeOil|PalFluid|PalOil|bone|Horn|Pal_crystal|RainbowCrystal|PalCrystal|MeteorDrop|Diamond|Ruby|Sapphire|Eemerald|Emerald|CaveMushroom|Venom|Poppy|Wheat|BeastBone|ElectricOrgan|FireOrgan|IceOrgan|Chromium|ManganeseOre|CopperOre|IronOre)/i],
-  ["Materiales", /(Ingot|Steel|Steal|Plastic|Polymer|CarbonFiber|Cement|Nail|MachineParts|Computer|Processed_Wood|GunPowder|Cloth2|StainlessSteel|Bio_|Thermal_|Corrosive|Circuit|AncientParts|Wood_Ancient|YakushimaIngot)/i],
-  ["Comida",     /(Bak(ed|e)|Soup|Salad|Cake|Bread|Meat|Egg|Milk|Honey|Berries|Juice|Jam|Pie|Stew|Pizza|Roast|Fried|Pancake|Omelet|Mushroom|Flour|Tomato|Lettuce|Onion|Potato|Carrot|Corn|Fruit|Grilled|Hot(Milk|Cocoa)|Yakisoba|Curry|Bacon|Chip|Bun|Pan\b|Sweet|Sandwich|Cheese)/i],
-  ["Medicina",   /(Potion|Medicine|Herb|Bandage|Antidote|Splint|Ointment|Opium)/i],
-  ["Munición",   /(Bullet|Arrow|Shell|Rocket|Grenade|RoughBullet|BowGun|Ammo)/i],
-  ["Esferas",    /(Sphere|SphereModule)/i],
-  ["Armas",      /(Bow|Gun|Rifle|Pistol|Sword|Axe|Spear|Knife|Launcher|Shotgun|Musket|Katana|^Bat|Hammer|Pickaxe|Revolver|Blade|Handgun|SMG|FlameThrower|Grappling|Fishing|WeakerBow|SFBow)/i],
-  ["Armadura",   /(Armor|Helmet|Shield|Head(Equip|001|002)|ClothArmor|FurArmor|Metal(Armor|Helmet))/i],
-  ["Accesorios", /(Accessory|Otomo_|Ring|Amulet|Pendant|Lantern|Glider|Torch|Homeward|Whistle)/i],
   ["Planos",     /^Blueprint_/i],
   ["Cartas",     /^SkillCard_/i],
   ["Pals",       /(PalSummon|PalItem_|PalEgg_|Pal_Egg)/i],
-  ["Mejora",     /(PalUpgradeStone|WorkSuitability_|ExpBoost|SkillUnlock|SkillFruit|Lotus_|AffectionFruit|Unlock_|Additional(Inventory|Equipment)|AutoMealPouch)/i],
-  ["Varios",     /(Key|TreasureBox|DogCoin|Money|Coin|Ticket|Proof|BountyProof|QuestItem|Salvage)/i],
+  ["Mejora",     /(WorkSuitability_|PalUpgradeStone|ExpBoost|SkillUnlock|SkillFruit|Lotus_|Elixir_|AffectionFruit|Unlock_|UnlockEquipmentSlot|StatusPointReset|Additional(Inventory|Equipment)|AutoMealPouch|PalStatue|Statue_)/i],
+  ["Munición",   /(Bullet|Arrow|Shell|Rocket|Grenade|Cartridge|Ammo\b|_Ammo)/i],
+  ["Esferas",    /(PalSphere|SphereModule|_Sphere\b|GigaSphere|MegaSphere)/i],
+  ["Medicina",   /(Potion|Medicine|Medicines|Herbs?\b|Bandage|Antidote|Splint|Ointment|Opium|Revive|MedicalSupplies|Nostrum|Narcotic|Doping)/i],
+  ["Armadura",   /(Armor|Helmet|Shield|Head(Equip|\d{3})|BodyEquip|Mask\d)/i],
+  ["Armas",      /(Bow|Gun|Rifle|Pistol|Sword|Axe|Spear|Knife|Launcher|Shotgun|Musket|Katana|Hammer|Pickaxe|Revolver|Blade|Handgun|SMG|FlameThrower|Flamethrower|Grappling|Fishing|Gatling|Baton|Bazooka|Missile\b|^Torch$|^Bat\d*(_\d+)?$|Meat.?Cut)/i],
+  ["Accesorios", /(Accessory|Otomo_|Ring\b|Amulet|Pendant|Lantern|Glider|Homeward|Whistle|Muffler|Cloak|Necklace)/i],
+  ["Comida",     /(Bak(ed|e)|Soup|Salad|Salada|Cake|Bread|Meat|Egg|Milk|Honey|Berries|Juice|Jam|Pie|Stew|Pizza|Roast|Fried|Pancake|Omelet|Mushroom|Flour|Tomato|Lettuce|Onion|Potato|Carrot|Corn|Fruit|Grilled|Hot(Milk|Cocoa)|Yakisoba|Curry|Bacon|Chip|Bun|Pan\b|Sweet|Sandwich|Cheese|Burger|HotDog|LocoMoco|SpringRoll|GenghisKhan|Chowder|Gratin|Gyoza|Quiche|Minestrone|Carbonara|Takoyaki|jelly|Saute|Seafood|Cutlass|Sashimi|Nigiri)/i],
+  ["Materiales", /(Ingot|Steel|Steal|Plastic|Polymer|Carbon.?Fiber|Cement|Nail|MachineParts|Computer|Circuit|Processed_Wood|Gun.?[Pp]owder|Cloth2|StainlessSteel|Bio_|Thermal_|Corrosive|Ancient.?Civ|AncientParts|Wood_Ancient|Yakushima\w*Ingot|WorldTreeIngot|SkyislandIngot|AIcore)/i],
+  ["Recursos",   /(Stone|Wood|Fiber|Leather|Wool|Cloth|Sulfur|Quartz|Coal|CrudeOil|PalFluid|PalOil|bone|Bone|Horn|crystal|RainbowCrystal|MeteorDrop|Diamond|Ruby|Sapphire|Emerald|CaveMushroom|Venom|Poppy|Wheat|Organ\b|Chromium|Ore\b|Ingot_Raw)/i],
+  ["Varios",     /(Key|TreasureBox|DogCoin|Money|Coin|Ticket|Proof|QuestItem|Salvage|Voucher)/i],
 ];
 function catOf(id) {
   for (const [name, rx] of CATS) if (rx.test(id)) return name;
   return "Otros";
 }
-const CAT_ORDER = [...CATS.map((c) => c[0]), "Otros"];
+// chip order — the categories people actually browse first
+const CAT_ORDER = ["Recursos", "Materiales", "Comida", "Medicina", "Munición", "Esferas",
+  "Armas", "Armadura", "Accesorios", "Mejora", "Planos", "Cartas", "Pals", "Varios", "Otros"];
 
 // ------------------------------------------------------------------ api
 
