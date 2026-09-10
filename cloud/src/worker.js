@@ -43,6 +43,31 @@ export default {
 
 const PX = Uint8Array.from(atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"), (c) => c.charCodeAt(0));
 
+// paldb.cc slugs are display-name based, not the game's internal ids. Map the
+// mismatches; everything else we try as-is (many ids do resolve).
+const ICON_ALIAS = {
+  Pal_crystal_S: "Paldium_Fragment", Pal_crystal_S_2: "Paldium_Fragment", Pal_crystal_S_3: "Paldium_Fragment",
+  CopperIngot: "Ingot", IronIngot: "Refined_Ingot", StealIngot: "Pal_Metal_Ingot", StainlessSteel: "Pal_Metal_Ingot",
+  CopperOre: "Ore", ManganeseOre: "Ore", GunPowder2: "Gunpowder", Cloth2: "Cloth", MachineParts2: "MachineParts",
+  Wood_Fine: "Lumber", Processed_Wood: "Lumber", HighGrade_Processed_Wood: "Lumber",
+  Computer: "Circuit_Board", Cement: "Cement", Polymer: "Polymer", CarbonFiber: "Carbon_Fiber",
+  ElectricOrgan: "Electric_Organ", FireOrgan: "Flame_Organ", IceOrgan: "Ice_Organ", bone: "Bone",
+  PalOil: "High_Quality_Pal_Oil", CrudeOil: "Crude_Oil", PalFluid: "Pal_Fluid",
+  Charcoal: "Charcoal", Flour: "Flour", Wheat: "Wheat", RainbowCrystal: "Rainbow_Crystal",
+  PalCrystal_Ex: "Large_Pal_Soul", MeteorDrop: "Meteorite_Fragment", AncientParts3: "Ancient_Civilization_Part",
+};
+
+function iconCandidates(id) {
+  const out = [];
+  const push = (s) => { if (s && !out.includes(s)) out.push(s); };
+  push(ICON_ALIAS[id]);
+  push(id);
+  push(id.replace(/_\d+$/, ""));                       // Katana_2 -> Katana
+  const noBp = id.replace(/^Blueprint_/, "");
+  if (noBp !== id) { push(noBp); push(noBp.replace(/_\d+$/, "")); }
+  return out.slice(0, 4);
+}
+
 async function iconProxy(rawId, request, ctx) {
   const id = rawId.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
   if (!id) return new Response(PX, { status: 404, headers: { "content-type": "image/gif" } });
@@ -52,32 +77,36 @@ async function iconProxy(rawId, request, ctx) {
   const hit = await cache.match(key);
   if (hit) return hit;
 
+  let iconUrl = null;
+  for (const cand of iconCandidates(id)) {
+    try {
+      const page = await fetch("https://paldb.cc/en/" + encodeURIComponent(cand), {
+        headers: { "user-agent": "PalCommand/1.0" }, cf: { cacheTtl: 86400 },
+      });
+      if (!page.ok) continue;
+      const html = await page.text();
+      const m = html.match(/https:\/\/cdn\.paldb\.cc\/image\/[^"'\s)]+T_itemicon_[^"'\s)]+\.(?:webp|png)/i);
+      if (m) { iconUrl = m[0]; break; }
+    } catch { /* next candidate */ }
+  }
+
   let out;
-  try {
-    const page = await fetch("https://paldb.cc/en/" + encodeURIComponent(id), {
-      headers: { "user-agent": "PalCommand/1.0" }, cf: { cacheTtl: 86400 },
-    });
-    const html = page.ok ? await page.text() : "";
-    const m = html.match(/https:\/\/cdn\.paldb\.cc\/image\/[^"'\s)]+T_itemicon_[^"'\s)]+\.(?:webp|png)/i);
-    if (m) {
-      const img = await fetch(m[0], { cf: { cacheTtl: 604800 } });
+  if (iconUrl) {
+    try {
+      const img = await fetch(iconUrl, { cf: { cacheTtl: 604800 } });
       if (img.ok) {
         out = new Response(img.body, {
           status: 200,
           headers: {
             "content-type": img.headers.get("content-type") || "image/webp",
-            "cache-control": "public, max-age=604800, immutable",
+            "cache-control": "public, max-age=1209600, immutable",
           },
         });
       }
-    }
-  } catch { /* fall through */ }
-
+    } catch { /* fall through */ }
+  }
   if (!out) {
-    out = new Response(PX, {
-      status: 404,
-      headers: { "content-type": "image/gif", "cache-control": "public, max-age=86400" },
-    });
+    out = new Response(PX, { status: 404, headers: { "content-type": "image/gif", "cache-control": "public, max-age=86400" } });
   }
   ctx.waitUntil(cache.put(key, out.clone()));
   return out;
