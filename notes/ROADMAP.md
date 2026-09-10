@@ -137,10 +137,17 @@ Code: rules.lua `M.evaluate` + main.lua `apply_rules` / `inflight_for`. Deploy 8
       (APP_TOKEN, DATHOST_USER, DATHOST_KEY) — /api/health?probe=1 confirms
       config{appToken,dathostUser,dathostKey}=true. `npx wrangler deploy` is run
       from this session (user's wrangler token cached on the machine). -->
-- [~] 4.3 API test — /api/health + probe DONE. /api/snapshot|orders|rules against
-      **real DatHost** still UNVERIFIED — needs the user's phone + APP_TOKEN once
-      (I have no token/creds). `/api/health?probe=1` now does a live DatHost read
-      and reports ok / "no inventory.json yet" / "FAIL: <status>".
+- [x] 4.3 API test — **DatHost Basic auth VERIFIED end-to-end 2026-09-10 03:44Z**.
+      Temp unauth `?diag=` probe (deployed, checked, reverted) returned
+      `dathost: "ok, inventory.json 35490 bytes"` — the Worker's
+      `Basic base64(email:password)` against dathost.com/api/0.1 works, mount-overlay
+      + file read both fine. Cross-checked via the in-app browser's live DatHost
+      session: mod is writing inventory.json (35 KB, 278 items), stations.json
+      (159 KB), state.json (native backend, hooked, ready) to the exact MOD_DATA_PATH.
+      DatHost API confirmed Basic-only (`WWW-Authenticate: Basic realm="DatHost"`).
+      Server = "PalMonte" (dallas), id 6a9966f03a02c380ecdb8e18, ue4ss on.
+      Still not exercised live: POST /orders and PUT /rules round-trips from the PWA
+      (need the APP_TOKEN in a browser — user's phone, or user pastes it).
 - [ ] 4.4 Mod → Worker push (Path B) — DEFERRED to Stage 5.
 - [x] 4.5 PWA points at the live Worker; inventory view real
       <!-- code done + deployed. `api()` -> cfg.url + Bearer cfg.token. Needs the
