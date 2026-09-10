@@ -407,11 +407,15 @@ function renderOrder() {
 
   const q = ($("#ordSearch")?.value || "").toLowerCase().trim();
   const catRank = (id) => { const i = CAT_ORDER.indexOf(catOfCache.get(id)); return i < 0 ? 99 : i; };
-  const matches = ids
+  let matches = ids
     .filter((id) => q ? (id.toLowerCase().includes(q) || nice(id).toLowerCase().includes(q))
                       : (inScope(id) && (ord.cat === "*" || catOfCache.get(id) === ord.cat)))
     .sort((a, b) => (q || ord.cat !== "*" ? 0 : catRank(a) - catRank(b))
       || nice(a).localeCompare(nice(b)) || a.length - b.length || a.localeCompare(b));
+  // Palworld registers some items under several recipes (Paldium ← Piedra / Mineral
+  // / Esfera...). Sorted so the base id is first; keep just that one per name.
+  const seen = new Set();
+  matches = matches.filter((id) => { const n = nice(id); return seen.has(n) ? false : (seen.add(n), true); });
   const CAP = 120;
   const shown = matches.slice(0, CAP);
   const overflow = matches.length - shown.length;
@@ -464,7 +468,11 @@ function renderShop(craft) {
     return;
   }
 
-  const cap = new Set((craft.get(ord.recipe) || []).map((s) => s.mapId));
+  // the picked id is the base recipe; a machine that only lists a same-item
+  // variant ("Pal_crystal_S_2") still counts — resolve it per station in order().
+  const wantName = nice(ord.recipe);
+  const cap = new Set();
+  for (const s of all) if ((s.recipes || []).some((r) => nice(r) === wantName)) cap.add(s.mapId);
   $("#ordHint").textContent = "“Cualquiera” toma la primera libre. Una máquina fija espera su turno si está ocupada.";
   fg.append(el("button", {
     class: "any", "aria-pressed": !ord.target,
@@ -636,7 +644,14 @@ async function forceRefresh() {
 async function order() {
   setCount($("#ordCount").value);
   if (!ord.recipe || !ord.count) return;
-  const { recipe, count } = ord;
+  let { recipe } = ord;
+  const { count } = ord;
+  // if a machine is pinned and only lists a same-item variant, send that exact id
+  if (ord.target) {
+    const s = (SNAP?.stations?.stations || []).find((x) => x.mapId === ord.target);
+    const v = (s?.recipes || []).find((r) => nice(r) === nice(recipe));
+    if (v) recipe = v;
+  }
   $("#ordGo").disabled = true;
   try {
     await api("/api/orders", { method: "POST", body: JSON.stringify({ recipe, count, target: ord.target || undefined, transport: ord.transport }) });
