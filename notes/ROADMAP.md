@@ -204,6 +204,23 @@ the browser POST of a code file); config.ini pushed by this session; server
 start/stop still driven via the in-app-browser DatHost session (user's choice —
 no worker admin endpoints).
 
+**Orden tab redesign 2026-09-10 (commits f004037..911a3f9):** dropped the two
+`<select>`s. Now: a photo grid of craftable items (stock-tab tiles) with the
+stock category bar + search; quantity as big −/+ steppers with a smart step +
+quick chips; "El taller" IS the machine picker (a "cualquiera libre" card +
+per-machine cards, capable-first, tap to pin); one PEDIR button with a live
+summary. Default view = bulk categories only (~164 on the live server, close to
+PBA's curated 106); "+ equipo" toggle reveals Armas/Armadura/Accesorios/Mejora
+(~768). Search always spans everything. `catOf()` reordered — specific families
+beat the Recursos/Materiales catch-alls (ClothArmor was landing in Recursos);
+"Otros" 84→3. Same-item multi-recipes (Paldium ← Piedra/Mineral/Esfera; Carbon
+Fiber ← Coal/Charcoal) collapse to the base id; renderShop + order() family-match
+so no machine is lost. `nice()` now splits camelCase + trailing tier numbers.
+PBA-vs-PalCommand recipe diff saved to scratchpad (PBA = 106 curated base
+inputs, no gear; PalCommand exposes all 932). Showing per-recipe ingredients
+would need the mod to read Palworld's recipe DataTable — DEFERRED, user chose
+"keep the base recipe" instead.
+
 ## STAGE 5 — Polish + publish
 
 **Distribution plan (user, 2026-09-09):** PWA-first the whole way; the App Store IS
