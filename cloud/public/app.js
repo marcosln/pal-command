@@ -407,10 +407,15 @@ function renderOrder() {
 
   const q = ($("#ordSearch")?.value || "").toLowerCase().trim();
   const catRank = (id) => { const i = CAT_ORDER.indexOf(catOfCache.get(id)); return i < 0 ? 99 : i; };
-  const matches = ids
+  let matches = ids
     .filter((id) => q ? (id.toLowerCase().includes(q) || nice(id).toLowerCase().includes(q))
                       : (inScope(id) && (ord.cat === "*" || catOfCache.get(id) === ord.cat)))
-    .sort((a, b) => (q || ord.cat !== "*" ? 0 : catRank(a) - catRank(b)) || nice(a).localeCompare(nice(b)));
+    .sort((a, b) => (q || ord.cat !== "*" ? 0 : catRank(a) - catRank(b))
+      || nice(a).localeCompare(nice(b)) || a.length - b.length || a.localeCompare(b));
+  // Palworld registers some items under several recipes (e.g. Paldium Fragment
+  // from Stone / Bone / Coal). Same display name -> keep just the base variant.
+  const seenName = new Set();
+  matches = matches.filter((id) => { const n = nice(id); if (seenName.has(n)) return false; seenName.add(n); return true; });
   const CAP = 120;
   const shown = matches.slice(0, CAP);
   const overflow = matches.length - shown.length;
