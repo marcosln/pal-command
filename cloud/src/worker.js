@@ -41,8 +41,6 @@ export default {
 // paldb.cc. First hit scrapes the item page for the CDN url; 404 -> 1x1 gif so
 // the app's <img onerror> can drop in a fallback tile.
 
-const PX = Uint8Array.from(atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"), (c) => c.charCodeAt(0));
-
 // paldb.cc slugs are display-name based, not the game's internal ids. Map the
 // mismatches; everything else we try as-is (many ids do resolve).
 const ICON_ALIAS = {
@@ -50,11 +48,14 @@ const ICON_ALIAS = {
   CopperIngot: "Ingot", IronIngot: "Refined_Ingot", StealIngot: "Pal_Metal_Ingot", StainlessSteel: "Pal_Metal_Ingot",
   CopperOre: "Ore", ManganeseOre: "Ore", GunPowder2: "Gunpowder", Cloth2: "Cloth", MachineParts2: "MachineParts",
   Wood_Fine: "Lumber", Processed_Wood: "Lumber", HighGrade_Processed_Wood: "Lumber",
-  Computer: "Circuit_Board", Cement: "Cement", Polymer: "Polymer", CarbonFiber: "Carbon_Fiber",
+  Computer: "Circuit_Board", CarbonFiber: "Carbon_Fiber", Plastic: "Polymer",
   ElectricOrgan: "Electric_Organ", FireOrgan: "Flame_Organ", IceOrgan: "Ice_Organ", bone: "Bone",
   PalOil: "High_Quality_Pal_Oil", CrudeOil: "Crude_Oil", PalFluid: "Pal_Fluid",
-  Charcoal: "Charcoal", Flour: "Flour", Wheat: "Wheat", RainbowCrystal: "Rainbow_Crystal",
-  PalCrystal_Ex: "Large_Pal_Soul", MeteorDrop: "Meteorite_Fragment", AncientParts3: "Ancient_Civilization_Part",
+  RainbowCrystal: "Rainbow_Crystal", PalCrystal_Ex: "Large_Pal_Soul", MeteorDrop: "Meteorite_Fragment",
+  AncientParts3: "Ancient_Civilization_Part", AncientParts2: "Ancient_Civilization_Part",
+  Berries: "Red_Berries", BerrySeeds: "Berry_Seeds", Medicines: "Low_Grade_Medical_Supplies",
+  LuxuryMedicines: "High_Grade_Medical_Supplies", Herbs: "Medicinal_Herbs",
+  Honey: "Honey", Wheat: "Wheat", Egg: "Egg", Milk: "Milk", Flour: "Flour",
 };
 
 function iconCandidates(id) {
@@ -70,18 +71,20 @@ function iconCandidates(id) {
 
 async function iconProxy(rawId, request, ctx) {
   const id = rawId.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
-  if (!id) return new Response(PX, { status: 404, headers: { "content-type": "image/gif" } });
+  if (!id) return new Response("bad id", { status: 404, headers: { "content-type": "text/plain" } });
 
   const cache = caches.default;
-  const key = new Request(new URL(request.url).origin + "/icon/" + id, { method: "GET" });
+  const key = new Request(new URL(request.url).origin + "/icon/v3/" + id, { method: "GET" });
   const hit = await cache.match(key);
   if (hit) return hit;
 
+  const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
   let iconUrl = null;
   for (const cand of iconCandidates(id)) {
     try {
       const page = await fetch("https://paldb.cc/en/" + encodeURIComponent(cand), {
-        headers: { "user-agent": "PalCommand/1.0" }, cf: { cacheTtl: 86400 },
+        headers: { "user-agent": UA, "accept": "text/html", "accept-language": "en" },
+        cf: { cacheTtl: 86400, cacheEverything: true },
       });
       if (!page.ok) continue;
       const html = await page.text();
@@ -106,7 +109,9 @@ async function iconProxy(rawId, request, ctx) {
     } catch { /* fall through */ }
   }
   if (!out) {
-    out = new Response(PX, { status: 404, headers: { "content-type": "image/gif", "cache-control": "public, max-age=86400" } });
+    // 404 with NO image body -> the app's <img onerror> fires the lettered tile.
+    // short cache so a later alias fix (or paldb un-throttling) recovers on its own.
+    out = new Response("no icon", { status: 404, headers: { "content-type": "text/plain", "cache-control": "public, max-age=3600" } });
   }
   ctx.waitUntil(cache.put(key, out.clone()));
   return out;

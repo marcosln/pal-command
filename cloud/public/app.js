@@ -150,7 +150,9 @@ function slotEl(id, qty, opts = {}) {
   const s = el("div", { class: "slot" + (opts.noimg ? " noimg" : ""), "data-l": (nice(id)[0] || "?").toUpperCase() });
   if (!opts.noimg) {
     const img = el("img", { loading: "lazy", alt: "", src: iconUrl(id) });
-    img.addEventListener("error", () => { img.remove(); s.classList.add("noimg"); });
+    const fail = () => { img.remove(); s.classList.add("noimg"); };
+    img.addEventListener("error", fail);
+    img.addEventListener("load", () => { if (img.naturalWidth <= 2) fail(); });
     s.append(img);
   }
   if (qty != null) s.append(el("span", { class: "qty" }, shortNum(qty)));
@@ -413,7 +415,9 @@ function renderStatus() {
 }
 function slotEl2(id) {
   const img = el("img", { class: "ic", loading: "lazy", alt: "", src: iconUrl(id) });
-  img.addEventListener("error", () => img.replaceWith(el("span", { class: "ic", style: "display:grid;place-items:center;font:700 12px Oswald;color:var(--ink-3)" }, (nice(id)[0] || "?").toUpperCase())));
+  const fail = () => img.replaceWith(el("span", { class: "ic", style: "display:grid;place-items:center;font:700 12px Oswald;color:var(--ink-3)" }, (nice(id)[0] || "?").toUpperCase()));
+  img.addEventListener("error", fail);
+  img.addEventListener("load", () => { if (img.naturalWidth <= 2) fail(); });
   return img;
 }
 
