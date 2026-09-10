@@ -185,6 +185,25 @@ recovered. Cause: brief window with 0 players on the Palworld server (mod pauses
 scanning / bases unload). Not an app bug. When a player is connected the pill
 reads "en línea", otherwise "sin jugador" and the data is the last written snapshot.
 
+**Inventory-freshness pulse (commit 1e0d060) — LIVE + VERIFIED 2026-09-10 18:08Z.**
+The full base-chest walk ran only every 4th scan (~8 min in idle). Now:
+- mod reads data/pulse.json each 10s tick. `at` within PulseActiveWindowSeconds
+  (120) => ACTIVE cadence + inventory every 2nd scan (~40s fresh). `force` +
+  new seq => one immediate full walk next tick. Config: PulseActiveWindowSeconds,
+  InventoryEveryNthScan. Clock-skew: none observed; p_fresh compares os.time()*1000
+  to the worker's Date.now() directly (revisit if a host clock ever drifts).
+- worker: GET /api/snapshot writes pulse.json (KV-throttled ~12s); ?pulse=force
+  always writes force. maybePulse().
+- app: tap the status pill -> forceRefresh() -> POST force pulse, poll
+  /api/snapshot?fresh=1 every 4s until state.lastScan changes. Pill shows
+  "actualizando…".
+Verified end-to-end: log line `scan loop: dynamic (... pulse 120s, inv every 4)`;
+`?pulse=force` -> inventory.generatedAt advanced within ~14s.
+Mod deploy: user uploaded main.lua via DatHost file manager (classifier blocks
+the browser POST of a code file); config.ini pushed by this session; server
+start/stop still driven via the in-app-browser DatHost session (user's choice —
+no worker admin endpoints).
+
 ## STAGE 5 — Polish + publish
 
 **Distribution plan (user, 2026-09-09):** PWA-first the whole way; the App Store IS
