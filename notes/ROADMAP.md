@@ -152,29 +152,38 @@ Code: rules.lua `M.evaluate` + main.lua `apply_rules` / `inflight_for`. Deploy 8
 - [x] 4.5 PWA points at the live Worker; inventory view real
       <!-- code done + deployed. `api()` -> cfg.url + Bearer cfg.token. Needs the
       one live check with real creds (4.3). -->
-- [x] 4.6 PWA order flow: create → shows "placed"/"queue" from state.json (Turno tab). Code done, live-check pending.
-- [x] 4.7 PWA rules editor (Reglas tab: gauge + min/target/batch/maxInProgress, PUT /api/rules). Code done, live-check pending.
-- [~] 4.8 Onboarding: setup view (paste Worker URL + APP_TOKEN → `/api/health?probe=1`
+- [x] 4.5 PWA reads real inventory — **VERIFIED LIVE 2026-09-10** with the user's
+      APP_TOKEN in the in-app browser: 279 items, 195k total, 40 stations, 3 bases,
+      connection pill live. `/api/snapshot` fine.
+- [x] 4.6 PWA order flow: create → "placed"/"queue" from state.json (Turno tab). Rendered
+      live; POST /orders round-trip not yet exercised (no craft placed from the app yet).
+- [x] 4.7 PWA rules editor (Reglas tab). Rendered live; PUT /rules round-trip not yet exercised.
+- [x] 4.8 Onboarding: setup view (paste Worker URL + APP_TOKEN → `/api/health?probe=1`
       → clear diagnostic: missing secrets / wrong token / DatHost rejected / ok).
-      The "app uploads the mod via the host API" automation is NOT built (Stage 5).
-
-**PWA redesign 2026-09-10** (commits 73db800..bcb343f9): full rebuild —
-dark ops-console, category grid of real item photos with the qty overlaid,
-bottom sheets, machine chips, rule gauges, no pinch-zoom. Item icons proxied
-from paldb.cc via /icon/b1/<id>: og:image resolution (no more wrong icons) +
-CDN name-guess fallback + **KV-backed durable store** (first resolve anywhere →
-30d in KV → every colo instant, survives paldb rate-limiting). Letter tile is
-the default so a slot is never blank. ~90% icon coverage; genuine misses
-(skill cards, removed items) stay as clean letter tiles.
-      The hard part isn't the token — it's getting the mod ONTO the server:
+      Still Stage 5 — the hard part isn't the token, it's getting the mod ONTO the server:
       * DatHost (+ API key): near-zero-touch — the app can toggle UE4SS on and
         upload the PalCommand mod folder itself via the API, then configure it.
-        User only pastes a key.
       * Other hosts / self-host: user installs the mod manually (standard UE4SS
-        mod install — a documented ~10-min step), then connects. Ship a short
-        install guide + the packaged mod zip (5.2).
-      RCON is not a shortcut: Palworld RCON has no inventory/crafting verbs, the
-      mod is required either way.
+        ~10-min step), then connects. Ship an install guide + the packaged zip (5.2).
+      RCON is not a shortcut: Palworld RCON has no inventory/crafting verbs.
+
+**PWA redesign 2026-09-10** (commits 73db800..e237f42): full rebuild —
+dark ops-console, category grid of real item photos with the qty overlaid,
+bottom sheets, machine chips, rule gauges, no pinch-zoom. Item icons proxied
+from paldb.cc via `/icon/b1/<id>`: og:image resolution (no wrong icons) +
+CDN name-guess fallback (snake_case, _Tier_00, Blueprint→schematic) +
+**KV-backed durable store** (first resolve anywhere → 30d in KV → every colo
+instant, survives paldb rate-limiting). Letter tile is the default so a slot is
+never blank; `warmIcons` pre-fills the whole inventory over a few polls.
+**~82% coverage on the real 279-item inventory** (100% of the top 100 by qty,
+all 82 blueprints); the ~50 misses are genuine paldb gaps — SkillCard_*,
+WorkSuitability_AddTicket_*, PalSummon_*_Parts — client-side denylisted so they
+draw the letter with zero requests.
+
+**"No había nada" 2026-09-10**: user opened the app and saw empty, then it
+recovered. Cause: brief window with 0 players on the Palworld server (mod pauses
+scanning / bases unload). Not an app bug. When a player is connected the pill
+reads "en línea", otherwise "sin jugador" and the data is the last written snapshot.
 
 ## STAGE 5 — Polish + publish
 
