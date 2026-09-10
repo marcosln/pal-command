@@ -1,10 +1,10 @@
 // Pal Command — service worker
 //   app shell:  network-first (so deploys show up), cache fallback for offline
-//   /icon/*:    network-first too — the icons are HTTP-cached hard at the edge,
-//               and a cache-first SW layer just pins any wrong-but-200 resolve
+//   /icon/*:    cache-first — icons live at a versioned path (/icon/b1/<id>) and
+//               are immutable per URL, so a hit never needs revalidating
 //   /api/*:     network only
 const SHELL = "pc-shell-v5";
-const ICONS = "pc-icons-v4";
+const ICONS = "pc-icons-v5";
 const SHELL_URLS = ["/", "/index.html", "/app.js", "/manifest.json", "/icon.svg"];
 
 self.addEventListener("install", (e) => {
@@ -24,12 +24,14 @@ const miss = () => new Response("", { status: 504, headers: { "content-type": "t
 
 async function icon(request) {
   const cache = await caches.open(ICONS);
+  const hit = await cache.match(request);
+  if (hit) return hit;                          // immutable per URL — trust it
   try {
     const res = await fetch(request);
-    if (res && res.ok) cache.put(request, res.clone());     // keep a copy for offline only
-    return res || (await cache.match(request)) || miss();
+    if (res && res.ok) cache.put(request, res.clone());   // only ever store a 200
+    return res || miss();
   } catch {
-    return (await cache.match(request)) || miss();
+    return miss();
   }
 }
 

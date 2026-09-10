@@ -158,31 +158,38 @@ function slotEl(id, qty, opts = {}) {
   return s;
 }
 
-// The letter tile is the *default* — a slot is never blank. We drop an <img> on
-// top and only reveal it once it truly decodes. A cold proxy resolve is a paldb
-// scrape (~1-4s each, ~6 parallel in the browser) and can briefly 429, so keep
-// retrying in the background with a widening delay; the letter just stays until
-// a try lands.
+// Per-session memory of what resolved, so the 20s re-render doesn't re-probe
+// every icon (and re-hammer the few that have no art). Cleared on reload — by
+// then KV may have filled a gap.
+const iconSeen = new Map();   // id -> "ok" | "bad"
+
+// The letter tile is the *default* — a slot is never blank. Drop an <img> on top
+// and reveal it only once it truly decodes. A cold proxy resolve is a paldb
+// scrape (~1-4s, can briefly 429), so retry a few times with a widening delay,
+// then settle: known-good ids skip straight to the image next render, known-bad
+// ids never build an <img> again this session.
 function mountIcon(host, id, kind) {
+  if (iconSeen.get(id) === "bad") return null;
   const img = el("img", kind === "mini" ? { alt: "" } : { decoding: "async", alt: "" });
+  const wasOk = iconSeen.get(id) === "ok";
   let tries = 0, timer, done = false;
   const good = () => {
     if (img.naturalWidth <= 2) return again();
-    done = true; clearTimeout(timer);
+    done = true; clearTimeout(timer); iconSeen.set(id, "ok");
     host.classList.remove("noimg");
   };
   const again = () => {
     if (done) return;
     clearTimeout(timer);
-    if (tries >= 4) return;                       // give up quietly — the letter stays
-    const wait = [500, 4000, 12000, 30000][tries++];
-    timer = setTimeout(() => { if (!done) img.src = iconUrl(id) + "?r=" + tries; }, wait);
+    const sched = wasOk ? [800, 4000] : [1500, 7000];
+    if (tries >= sched.length) { if (!wasOk) iconSeen.set(id, "bad"); return; }
+    timer = setTimeout(() => { if (!done) img.src = iconUrl(id) + "?r=" + (++tries); }, sched[tries]);
   };
   img.addEventListener("load", good);
   img.addEventListener("error", again);
   host.append(img);
   img.src = iconUrl(id);
-  timer = setTimeout(again, 6000);               // stalled: no load, no error
+  timer = setTimeout(again, wasOk ? 4000 : 6500);   // stalled: no load, no error
   return img;
 }
 
