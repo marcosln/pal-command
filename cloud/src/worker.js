@@ -5,7 +5,7 @@
 // through the host's file API (DatHost for v1). Secrets never reach the browser.
 //
 // Routes
-//   GET  /api/snapshot          -> { inventory, stations, state, rules, orders }
+//   GET  /api/snapshot          -> { inventory, stations, recipes, state, rules, orders }
 //   POST /api/orders            -> add an immediate craft order
 //   DELETE /api/orders/:id      -> remove a queued order
 //   PUT  /api/rules             -> replace the standing-rules list
@@ -326,14 +326,18 @@ async function handleApi(request, env, ctx, url) {
       if (cached) return json({ ...cached, cached: true });
     }
     await dh.mountOverlay();
-    const [inventory, stations, state, rules, orders] = await Promise.all([
+    const [inventory, stations, recipes, state, rules, orders] = await Promise.all([
       readJson(dh, "inventory.json", null),
       readJson(dh, "stations.json", null),
+      // Kept separate from stations.json to avoid duplicating one recipe
+      // definition per capable machine. Default covers a mod that hasn't
+      // rebuilt the catalog yet (fresh install, pre-boot restart window).
+      readJson(dh, "recipes.json", { schemaVersion: 1, recipes: {} }),
       readJson(dh, "state.json", null),
       readJson(dh, "rules.json", { rules: [] }),
       readJson(dh, "orders.json", []),
     ]);
-    const payload = { inventory, stations, state, rules, orders, fetchedAt: new Date().toISOString() };
+    const payload = { inventory, stations, recipes, state, rules, orders, fetchedAt: new Date().toISOString() };
     ctx.waitUntil(env.CACHE.put(cacheKey, JSON.stringify(payload), { expirationTtl: Math.max(ttl, 5) }));
     // warm the icon store for this snapshot's items so the stock tab paints fast.
     // KV-aware + throttled, so after the first poll this is ~free.

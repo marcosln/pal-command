@@ -147,6 +147,26 @@ const ago = (iso) => {
   return s < 60 ? Math.round(s) + "s" : s < 3600 ? Math.round(s / 60) + "m" : Math.round(s / 3600) + "h";
 };
 
+// Counts up (or down) an element's displayed number instead of snapping.
+// Duration scales with the jump but is capped, so a big change (switching
+// category filters) still resolves quickly rather than crawling.
+const _numAnim = new WeakMap();
+function animateNum(elx, to) {
+  const from = Number(elx.dataset.n || NaN);
+  elx.dataset.n = to;
+  if (!isFinite(from) || from === to) { elx.textContent = num(to); return; }
+  cancelAnimationFrame(_numAnim.get(elx));
+  const dur = Math.min(700, Math.max(220, Math.abs(to - from) * 2));
+  const t0 = performance.now();
+  const step = (t) => {
+    const p = Math.min(1, (t - t0) / dur);
+    const eased = 1 - Math.pow(1 - p, 3);
+    elx.textContent = num(from + (to - from) * eased);
+    if (p < 1) _numAnim.set(elx, requestAnimationFrame(step));
+  };
+  _numAnim.set(elx, requestAnimationFrame(step));
+}
+
 // ------------------------------------------------------------------ chrome
 
 const VIEWS = ["stock", "order", "rules", "status"];
@@ -155,6 +175,7 @@ function show(tab) {
   localStorage.setItem(LS.tab, tab);
   VIEWS.forEach((t) => ($("#v-" + t).hidden = t !== tab));
   $$("#tabs button").forEach((b) => b.setAttribute("aria-selected", b.dataset.tab === tab));
+  $("#tabs").style.setProperty("--ti", VIEWS.indexOf(tab));
   // re-render on entry so lazy <img> observers attach while the section is visible
   if (tab === "stock" && SNAP) renderStock();
   if (tab === "order" && SNAP) renderOrder();
@@ -291,7 +312,7 @@ function renderStock() {
   const canMake = new Set();
   for (const s of SNAP?.stations?.stations || []) for (const r of s.recipes || []) canMake.add(r);
 
-  $("#totN").textContent = num(rows.reduce((a, [, n]) => a + n, 0));
+  animateNum($("#totN"), rows.reduce((a, [, n]) => a + n, 0));
   $("#totLbl").textContent = `en ${rows.length} items` + (activeCat !== "*" ? ` · ${activeCat}` : "");
   $("#totline").hidden = !rows.length;
 
@@ -343,8 +364,9 @@ function itemSheet(id, n) {
 
 // ------------------------------------------------------------------ order
 
-const ord = { recipe: null, target: "", count: 50, transport: true, cat: null, gear: false };
+const ord = { recipe: null, target: "", baseId: null, count: 50, transport: true, cat: null, gear: false };
 let ordGridSig = "";
+let lastCraft = null;   // craftability() result for the current recipe+base, cached by renderOrder()
 // prefer the categories people actually bulk-craft as the landing view
 const ORD_CAT_PREF = ["Materiales", "Comida", "Munición", "Medicina", "Esferas", "Recursos"];
 // you don't bulk-craft schematics or skill fruits — keep them out of the order picker
@@ -368,20 +390,135 @@ const stepFor = (n) => (n >= 500 ? 100 : n >= 100 ? 25 : n >= 20 ? 10 : 1);
 function setCount(n) {
   ord.count = Math.max(1, Math.min(99999, Math.floor(Number(String(n).replace(/\D/g, "")) || 1)));
   const f = $("#ordCount"); if (f) f.value = ord.count;
+  ord.baseId = resolveBaseId();
+  lastCraft = renderMats();
   syncGo();
 }
 
 function syncGo() {
   const go = $("#ordGo");
-  if (!ord.recipe) { go.hidden = true; return; }
+  const goFull = $("#ordGoFull");
+  if (!ord.recipe) { go.hidden = true; goFull.hidden = true; return; }
   go.hidden = false;
   const where = ord.target ? mFull((SNAP?.stations?.stations || []).find((x) => x.mapId === ord.target) || {}) : "cualquier máquina libre";
+  const cap = lastCraft && lastCraft.known ? lastCraft.maxCount : null;
+  const capped = cap != null && cap < ord.count;
+  const sendCount = capped ? cap : ord.count;
   go.innerHTML = "";
-  go.append(document.createTextNode(`Pedir · ${nice(ord.recipe)} ×${ord.count}`), el("small", {}, "→ " + where));
+  go.disabled = capped && sendCount <= 0;
+  go.append(document.createTextNode(`Pedir · ${nice(ord.recipe)} ×${sendCount}`), el("small", {}, "→ " + where));
+  if (capped) {
+    goFull.hidden = false;
+    goFull.textContent = `Poner los ${ord.count} en cola igual (espera materiales)`;
+  } else {
+    goFull.hidden = true;
+  }
+}
+
+// Real ingredient costs, straight from the mod's recipes.json (Palworld's own
+// recipe DataTable — see notes/recipe-planner.md). Absent/empty until the mod
+// has built its catalog at least once.
+function recipeDef(id) {
+  const r = SNAP?.recipes?.recipes;
+  return (r && r[id]) || null;
+}
+
+function baseItemMap(baseId) {
+  if (!baseId) return null;
+  const base = (SNAP?.inventory?.bases || []).find((b) => b.id === baseId);
+  if (!base) return null;
+  const items = {};
+  for (const ct of base.containers || []) for (const [id, n] of Object.entries(ct.items || {})) items[id] = (items[id] || 0) + (Number(n) || 0);
+  return items;
+}
+
+// Required/available/missing per ingredient for `count` units of `id`, against
+// the selected base's stock (or the whole server if no machine is pinned yet).
+// `count` is the OUTPUT quantity (what /api/orders sends), so cost scales by
+// the recipe's own output batch size. `maxCount` is unknown (null) rather than
+// 0 when the mod hasn't published ingredient data yet — never silently caps.
+function craftability(id, count, baseId) {
+  const def = recipeDef(id);
+  if (!def || !Array.isArray(def.ingredients) || !def.ingredients.length || !def.output?.quantity) {
+    return { known: false, scope: null, rows: [], maxCount: null };
+  }
+  const scope = baseId ? "base" : "server";
+  const stock = baseId ? (baseItemMap(baseId) || {}) : (SNAP?.inventory?.totals || {});
+  const perBatchOut = def.output.quantity;
+  const batchesWanted = Math.max(1, Math.ceil((count || 1) / perBatchOut));
+  let maxBatches = Infinity;
+  const rows = def.ingredients.map((ing) => {
+    const have = Number(stock[ing.item]) || 0;
+    const need = ing.quantity * batchesWanted;
+    maxBatches = Math.min(maxBatches, Math.floor(have / ing.quantity));
+    return { item: ing.item, need, have, short: have < need };
+  });
+  if (!isFinite(maxBatches)) maxBatches = 0;
+  return { known: true, scope, rows, maxCount: maxBatches * perBatchOut };
+}
+
+// When no machine is pinned ("cualquier máquina libre"), a naive server-wide
+// total overstates what's really available -- the order will actually draw
+// from whichever ONE base's machine takes it. Auto-pick the base most likely
+// to fill the order: among free (idle) machines that can make this recipe,
+// the base with the highest craftable count for the current requested amount.
+// Falls back to any capable machine (even busy) if none are free, and to null
+// (unknown scope -> server totals shown as an estimate) if the recipe's cost
+// isn't known yet or nothing can make it.
+function bestBaseForRecipe(id, count) {
+  const def = recipeDef(id);
+  if (!def || !Array.isArray(def.ingredients) || !def.ingredients.length) return null;
+  const wantName = nice(id);
+  const candidates = (SNAP?.stations?.stations || []).filter((s) => (s.recipes || []).some((r) => nice(r) === wantName));
+  const free = candidates.filter((s) => !mBusy(s));
+  const pool = (free.length ? free : candidates).filter((s) => s.baseId);
+  if (!pool.length) return null;
+  let bestId = null, bestScore = -1;
+  for (const bid of new Set(pool.map((s) => s.baseId))) {
+    const score = craftability(id, count, bid).maxCount;
+    if (score > bestScore) { bestScore = score; bestId = bid; }
+  }
+  return bestId;
+}
+
+// The base whose stock actually gates this order: the pinned machine's base,
+// or (for "cualquier máquina libre") the best candidate base per bestBaseForRecipe.
+function resolveBaseId() {
+  if (ord.target) {
+    const s = (SNAP?.stations?.stations || []).find((x) => x.mapId === ord.target);
+    return s ? s.baseId || null : null;
+  }
+  return ord.recipe ? bestBaseForRecipe(ord.recipe, ord.count) : null;
+}
+
+// Small-text ingredient panel under the quantity stepper. Returns the
+// craftability() result so syncGo()/order() can reuse it without recomputing.
+function renderMats() {
+  const box = $("#ordMats");
+  if (!ord.recipe) { box.hidden = true; return null; }
+  const c = craftability(ord.recipe, ord.count, ord.baseId);
+  box.hidden = !c.known;
+  if (!c.known) return c;
+  box.innerHTML = "";
+  const scopeLabel = c.scope === "base"
+    ? baseLabel(ord.baseId) + (ord.target ? "" : " · mejor opción")
+    : "todo el server";
+  box.append(el("div", { class: "mhead" }, "Materiales · " + scopeLabel));
+  c.rows.forEach((r, i) => box.append(el("div", {
+    class: "mrow" + (r.short ? " short" : ""), style: `animation-delay:${i * 35}ms`,
+  }, [
+    el("span", {}, nice(r.item)),
+    el("span", {}, [el("b", {}, num(r.have)), " / " + num(r.need)]),
+  ])));
+  if (c.maxCount < (ord.count || 0)) {
+    box.append(el("div", { class: "mnote" }, `Con lo que hay ahora fabricás ${num(c.maxCount)}.`));
+  }
+  return c;
 }
 
 function renderOrder() {
   const craft = craftMap();
+  ord.baseId = resolveBaseId();
   const ids = [...craft.keys()].filter((id) => !ORD_SKIP.test(id));
   if (ord.recipe && !craft.has(ord.recipe)) { ord.recipe = null; ord.target = ""; }
 
@@ -442,6 +579,7 @@ function renderOrder() {
   $("#ordTransport").checked = ord.transport;
 
   renderShop(craft);
+  lastCraft = renderMats();
   syncGo();
 }
 
@@ -465,7 +603,7 @@ function renderShop(craft) {
   ]);
 
   if (!ord.recipe) {
-    $("#ordHint").textContent = all.length ? "Tocá una máquina para empezar por ahí, o elegí una receta arriba." : "";
+    $("#ordHint").textContent = all.length ? "Elegí una receta arriba, o tocá una máquina para empezar por ahí." : "";
     all.sort((a, b) => (mBusy(a) ? 1 : 0) - (mBusy(b) ? 1 : 0)).forEach((s) => fg.append(card(s, false)));
     return;
   }
@@ -643,25 +781,28 @@ async function forceRefresh() {
   }
 }
 
-async function order() {
+async function order(full = false) {
   setCount($("#ordCount").value);
   if (!ord.recipe || !ord.count) return;
   let { recipe } = ord;
-  const { count } = ord;
+  const cap = lastCraft && lastCraft.known ? lastCraft.maxCount : null;
+  const count = (!full && cap != null) ? Math.min(ord.count, cap) : ord.count;
+  if (count <= 0) { toast("No hay materiales suficientes ahora mismo.", true); return; }
   // if a machine is pinned and only lists a same-item variant, send that exact id
   if (ord.target) {
     const s = (SNAP?.stations?.stations || []).find((x) => x.mapId === ord.target);
     const v = (s?.recipes || []).find((r) => nice(r) === nice(recipe));
     if (v) recipe = v;
   }
-  $("#ordGo").disabled = true;
+  $("#ordGo").disabled = true; $("#ordGoFull").disabled = true;
   try {
     await api("/api/orders", { method: "POST", body: JSON.stringify({ recipe, count, target: ord.target || undefined, transport: ord.transport }) });
-    toast(`En cola: ${nice(recipe)} ×${count}`);
-    ord.target = "";
+    toast(`En cola: ${nice(recipe)} ×${count}` + (count < ord.count ? " (esperando materiales)" : ""));
+    const btn = full ? $("#ordGoFull") : $("#ordGo");
+    btn.classList.remove("flash-ok"); void btn.offsetWidth; btn.classList.add("flash-ok");
     await refresh({ fresh: true });
   } catch (e) { toast(e.message, true); }
-  $("#ordGo").disabled = false;
+  $("#ordGo").disabled = false; $("#ordGoFull").disabled = false;
 }
 async function removeOrder(id) {
   try { await api("/api/orders/" + encodeURIComponent(id), { method: "DELETE" }); await refresh({ fresh: true }); }
@@ -719,11 +860,12 @@ $("#cfgSave").addEventListener("click", async () => {
 });
 $("#cfgDemo").addEventListener("click", () => { cfg.demo = true; gotoApp(); toast("Demo con datos de ejemplo"); });
 $("#forget").addEventListener("click", () => { localStorage.clear(); location.reload(); });
-$("#ordGo").addEventListener("click", order);
+$("#ordGo").addEventListener("click", () => order(false));
+$("#ordGoFull").addEventListener("click", () => order(true));
 $("#ordSearch").addEventListener("input", renderOrder);
 $("#qMinus").addEventListener("click", () => setCount(ord.count - stepFor(ord.count)));
 $("#qPlus").addEventListener("click", () => setCount(ord.count + stepFor(ord.count)));
-$("#ordCount").addEventListener("input", (e) => { const n = parseInt(e.target.value.replace(/\D/g, ""), 10); if (!isNaN(n)) { ord.count = Math.min(99999, n); syncGo(); } });
+$("#ordCount").addEventListener("input", (e) => { const n = parseInt(e.target.value.replace(/\D/g, ""), 10); if (!isNaN(n)) { ord.count = Math.min(99999, n); ord.baseId = resolveBaseId(); lastCraft = renderMats(); syncGo(); } });
 $("#ordCount").addEventListener("blur", () => setCount($("#ordCount").value));
 $("#ordTransport").addEventListener("change", (e) => { ord.transport = e.target.checked; });
 $("#qChips").addEventListener("click", (e) => {
@@ -774,21 +916,31 @@ const DEMO = {
       Blueprint_Katana_2: 3, SkillCard_Apocalypse: 7, RoughBullet: 144, Arrow: 714,
     },
     bases: [
-      { name: "Base principal", containers: [
+      { id: "base-1", name: "Base principal", containers: [
         { name: "Cofre 1", items: { Stone: 5200, Wood: 9000, CopperOre: 4600 } },
-        { name: "Cofre 2", items: { CopperIngot: 10000, Cloth: 77, Flour: 2330 } },
+        { name: "Cofre 2", items: { CopperIngot: 10000, Cloth: 77, Flour: 2330, Wheat: 40, Battery: 2 } },
       ] },
-      { name: "Base minera", containers: [
+      { id: "base-2", name: "Base minera", containers: [
         { name: "Cofre 1", items: { Stone: 520, Sulfur: 9740, Charcoal: 1610, Pal_crystal_S: 605 } },
       ] },
     ],
     guildChest: { available: true, items: { CopperIngot: 540, IronIngot: 122 } },
   },
+  // real ingredient costs (recipes.json shape) -- lets the demo show the
+  // material check without a live server. Battery is deliberately scarce at
+  // Base principal (2 on hand) to demo the exact bug this feature fixes.
+  recipes: { schemaVersion: 1, recipes: {
+    Pal_crystal_S: { output: { item: "Pal_crystal_S", quantity: 1 }, ingredients: [{ item: "Stone", quantity: 3 }] },
+    Charcoal: { output: { item: "Charcoal", quantity: 1 }, ingredients: [{ item: "Wood", quantity: 2 }] },
+    CopperIngot: { output: { item: "CopperIngot", quantity: 1 }, ingredients: [{ item: "CopperOre", quantity: 2 }, { item: "Coal", quantity: 1 }] },
+    IronIngot: { output: { item: "IronIngot", quantity: 1 }, ingredients: [{ item: "CopperOre", quantity: 2 }, { item: "Coal", quantity: 2 }, { item: "Battery", quantity: 1 }] },
+    Flour: { output: { item: "Flour", quantity: 1 }, ingredients: [{ item: "Wheat", quantity: 1 }] },
+  } },
   stations: { stations: [
-    { key: "b1|crush", mapId: "d-crush-1", machineType: "BP_BuildObject_Crusher_C", baseName: "Base principal", recipes: ["Pal_crystal_S", "Charcoal", "Fiber"], state: { recipe: "None", remaining: 0, requested: 0, workable: false } },
-    { key: "b1|furn", mapId: "d-furn-1", machineType: "BP_BuildObject_BlastFurnace_C", baseName: "Base principal", recipes: ["CopperIngot", "IronIngot", "Charcoal"], state: { recipe: "CopperIngot", remaining: 32, requested: 50, workable: true } },
-    { key: "b1|mill", mapId: "d-mill-1", machineType: "BP_BuildObject_FlourMill_C", baseName: "Base principal", recipes: ["Flour"], state: { recipe: "Flour", remaining: 88, requested: 100, workable: true } },
-    { key: "b2|crush", mapId: "d-crush-2", machineType: "BP_BuildObject_Crusher_C", baseName: "Base minera", recipes: ["Pal_crystal_S"], state: { recipe: "None", remaining: 0, requested: 0, workable: false } },
+    { key: "b1|crush", mapId: "d-crush-1", baseId: "base-1", machineType: "BP_BuildObject_Crusher_C", baseName: "Base principal", recipes: ["Pal_crystal_S", "Charcoal", "Fiber"], state: { recipe: "None", remaining: 0, requested: 0, workable: false } },
+    { key: "b1|furn", mapId: "d-furn-1", baseId: "base-1", machineType: "BP_BuildObject_BlastFurnace_C", baseName: "Base principal", recipes: ["CopperIngot", "IronIngot", "Charcoal"], state: { recipe: "CopperIngot", remaining: 32, requested: 50, workable: true } },
+    { key: "b1|mill", mapId: "d-mill-1", baseId: "base-1", machineType: "BP_BuildObject_FlourMill_C", baseName: "Base principal", recipes: ["Flour"], state: { recipe: "Flour", remaining: 88, requested: 100, workable: true } },
+    { key: "b2|crush", mapId: "d-crush-2", baseId: "base-2", machineType: "BP_BuildObject_Crusher_C", baseName: "Base minera", recipes: ["Pal_crystal_S"], state: { recipe: "None", remaining: 0, requested: 0, workable: false } },
   ] },
   state: {
     backend: "native", hookInstalled: true, queueDepth: 1,
