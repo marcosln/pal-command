@@ -221,6 +221,59 @@ inputs, no gear; PalCommand exposes all 932). Showing per-recipe ingredients
 would need the mod to read Palworld's recipe DataTable — DEFERRED, user chose
 "keep the base recipe" instead.
 
+- [~] 4.6 Recipe-aware order planner (reopened 2026-09-15, real cost read + flow
+      reorder done 2026-09-17, live verification pending).
+      <!-- 2026-09-17: root cause of "pedí varias máquinas y no pasó nada" (user) was
+      the app never knew a recipe's material cost, so an order that couldn't be
+      afforded (missing batteries) just queued silently. Fixed at the source instead
+      of a hand-kept cost table (recipe-planner.md's own constraint): Palworld keeps
+      real recipe costs in a DataTable (row struct PalItemRecipe: Product_Id/Count,
+      Material1..5_Id/Count, WorkAmount, EnergyType/Amount -- confirmed via
+      palschema-hub's SDK-verified schema + a real DT_ItemRecipeDataTable_Common
+      dump, community source, not this server). UE4SS can read it by pure reflection
+      (UDataTable Lua binding: GetAllRows/ForEachRow/GetRowMap/GetRowNames -- no
+      native DLL, no memory offsets, unlike the abandoned 0x2F9B680/0x2F96A20
+      pointer-chain idea in para-codex-06). Built:
+        * discovery.lua M.recipe_catalog() -- scans every loaded DataTable named
+          *ItemRecipe*, tries all 4 UE4SS row-read APIs in order (a strategy is only
+          accepted if it actually delivers rows, not just calls clean -- a no-op
+          binding must not look like success), builds {output,ingredients,workAmount,
+          energy} per recipe id. Unit-tested against stub DataTables for all 4 APIs
+          (scratchpad test_recipe_catalog.lua, all pass) -- game-side row-read API
+          choice is NOT yet verified against the live UE4SS build (SHA ba2efd55).
+        * main.lua: one-shot build_recipe_catalog() at boot (+16s), publishes
+          data/recipes.json, logs table/row counts (WARN if 0 -- first-deploy
+          diagnostic since the exact API is unverified live); _G.PalCommand.rebuild_recipes()
+          for manual re-trigger.
+        * PWA (app.js/index.html): Orden tab kept its order (product → machine →
+          cantidad, confirmed with user 2026-09-17 -- an earlier machine-first
+          draft was reverted same day) but the machine step now feeds a real
+          material check: picking one machine scopes the ingredient math to that
+          machine's own base (inv.bases[].containers[].items, same id as
+          station.baseId). Picking "cualquier máquina libre" no longer shows a
+          naive server-wide sum (which overstates what one craft can draw, since
+          it only ever pulls from ONE base) -- bestBaseForRecipe() auto-picks,
+          among bases with a free capable machine, whichever has the highest
+          craftable count for the requested amount, and the panel labels it
+          "· mejor opción" so it's clear which base the numbers are for. A small
+          ingredient list (required/have, short in red) renders under the qty
+          stepper; PEDIR sends min(count, craftable-now); a second "Poner los N
+          en cola igual" button appears only when capped, for an explicit full
+          queue that waits on materials (never a silent no-op). Missing/empty
+          recipes.json (mod not yet redeployed) -> "known:false" -> no cap, old
+          behaviour, never blocks ordering.
+        * Deliberately NOT done yet: reservation netting against other queued/
+          in-flight orders (recipe-planner.md's "reserve once, FIFO" -- current cap
+          reads live stock only, so two orders queued back-to-back against the same
+          scarce material can each show "craftable" independently); alternative-
+          recipe merging; tappable missing-ingredient -> child order.
+      NEXT: deploy (push, upload recipes read to DatHost, restart), check
+      palcommand.log for the "recipe catalog: N recipe(s) from N table(s)" line --
+      if tables_read=0 the DataTable name/search needs adjusting, if rows_read>0 but
+      n=0 the field names need adjusting for this game build; then verify one known
+      recipe's ingredients in recipes.json and try the new Orden flow live. -->
+      Full design: notes/recipe-planner.md.
+
 ## STAGE 5 — Polish + publish
 
 **Distribution plan (user, 2026-09-09):** PWA-first the whole way; the App Store IS
