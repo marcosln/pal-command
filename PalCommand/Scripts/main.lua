@@ -27,6 +27,7 @@ local PATHS = {
     log = ROOT .. "\\data\\palcommand.log",
     inventory = ROOT .. "\\data\\inventory.json",
     stations = ROOT .. "\\data\\stations.json",
+    recipes = ROOT .. "\\data\\recipes.json",
     orders = ROOT .. "\\data\\orders.json",
     rules = ROOT .. "\\data\\rules.json",
     queue = ROOT .. "\\data\\queue.json",
@@ -366,6 +367,31 @@ local function write_stations(list)
     }))
 end
 
+--- One-shot: read Palworld's own recipe DataTable and publish recipes.json (real
+--- ingredient costs, not a hand-kept table -- see notes/recipe-planner.md). The
+--- DataTable is a static asset, so this only needs to run once per server boot.
+local function build_recipe_catalog()
+    local okc, recipes, tables_read, rows_read = pcall(discovery.recipe_catalog)
+    if not okc then
+        util.log("recipe catalog: FAILED - " .. tostring(recipes))
+        return
+    end
+    local n = 0
+    for _ in pairs(recipes) do n = n + 1 end
+    util.write_file(PATHS.recipes, json.encode({
+        schemaVersion = 1,
+        generatedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        recipes = recipes,
+    }))
+    util.log(string.format("recipe catalog: %d recipe(s) from %d table(s), %d row(s) scanned",
+        n, tables_read or 0, rows_read or 0))
+    if tables_read == 0 then
+        util.log("recipe catalog: WARN no DataTable matched 'ItemRecipe' by name -- app will show costs as unavailable")
+    elseif n == 0 then
+        util.log("recipe catalog: WARN table(s) found but 0 usable rows -- check UE4SS DataTable row-read API on this build")
+    end
+end
+
 -- ---------------------------------------------------------------- scan cycle
 
 -- One scan: read inventory + stations, publish JSON, apply rules. Runs on the
@@ -550,6 +576,15 @@ local function boot()
         end)
     end
 
+    -- one-shot: publish real recipe costs (data/recipes.json) from Palworld's own
+    -- recipe DataTable. Independent of the station scan; safe to run once early.
+    if type(ExecuteWithDelay) == "function" then
+        ExecuteWithDelay(16000, function()
+            if ExecuteInGameThread then ExecuteInGameThread(function() pcall(build_recipe_catalog) end)
+            else pcall(build_recipe_catalog) end
+        end)
+    end
+
     -- one-shot: learn the Cancel_ServerInternal signature (needed for cancelling a
     -- craft the game already accepted). Cheap reflection, logs once.
     if type(engine.probe_cancel) == "function" and type(ExecuteWithDelay) == "function" then
@@ -594,6 +629,7 @@ _G.PalCommand.enqueue = function(o)
 end
 _G.PalCommand.cancel = function(sel) return cancel_orders(sel) end
 _G.PalCommand.watch = function() return engine._placed_watch end
+_G.PalCommand.rebuild_recipes = function() build_recipe_catalog() end
 
 local armed = false
 local function arm() if not armed then armed = true; pcall(boot) end end

@@ -425,6 +425,95 @@ function M.dump_convert_api()
     return out
 end
 
+-- ---------------------------------------------------------------- recipes
+
+--- Real ingredient costs, read straight from Palworld's own recipe DataTable
+--- (row struct PalItemRecipe: Product_Id/Product_Count, Material1..5_Id/Count,
+--- WorkAmount, EnergyType/EnergyAmount). No hand-kept cost table -- if the game
+--- or a server-side data mod changes a recipe, the next catalog build reads the
+--- change. The table is a static asset (not a live per-station object), so a
+--- caller only needs to build this once per boot and cache the result.
+--
+-- UE4SS's DataTable Lua binding varies by build (GetAllRows / ForEachRow /
+-- GetRowMap / GetRowNames+FindRow have all existed at different points). Try
+-- each in order; a method that exists but is a no-op binding (calls clean but
+-- never invokes the callback) must not be trusted just because it didn't
+-- error, so each strategy is scored by rows actually delivered and only a
+-- strategy that delivers at least one row is accepted.
+local function each_datatable_row(dt, cb)
+    local rows = ok(function() return dt:GetAllRows() end)
+    if type(rows) == "table" and #rows > 0 then
+        for _, row in ipairs(rows) do cb(fstr(row.Name), row.Data) end
+        return #rows
+    end
+
+    local seen = 0
+    ok(function()
+        dt:ForEachRow(function(rowName, rowData) seen = seen + 1; cb(fstr(rowName), rowData) end)
+    end)
+    if seen > 0 then return seen end
+
+    local map = ok(function() return dt:GetRowMap() end)
+    if type(map) == "table" then
+        local n = 0
+        for rowName, rowData in pairs(map) do n = n + 1; cb(fstr(rowName), rowData) end
+        if n > 0 then return n end
+    end
+
+    local names = ok(function() return dt:GetRowNames() end)
+    if type(names) == "table" and #names > 0 then
+        local n = 0
+        for _, rowName in ipairs(names) do
+            local rowData = ok(function() return dt:FindRow(fstr(rowName)) end)
+            if rowData ~= nil then n = n + 1; cb(fstr(rowName), rowData) end
+        end
+        return n
+    end
+    return 0
+end
+
+--- Scan every loaded DataTable whose name contains "ItemRecipe" and build
+--- { [recipeId] = { output = {item,quantity}, ingredients = {{item,quantity},...},
+---   workAmount = n, energy = {type,amount} } }. Returns catalog, tablesRead, rowsRead.
+function M.recipe_catalog()
+    local recipes, tables_read, rows_read = {}, 0, 0
+    for _, dt in ipairs(util.find_all("DataTable")) do
+        if valid(dt) then
+            local name = fstr(ok(function() return dt:GetFName() end))
+            if name:find("ItemRecipe", 1, true) then
+                tables_read = tables_read + 1
+                each_datatable_row(dt, function(rowName, data)
+                    if rowName == "" or data == nil then return end
+                    rows_read = rows_read + 1
+                    local out_item = fstr(ok(function() return data.Product_Id end))
+                    local out_qty = tonumber(ok(function() return data.Product_Count end)) or 0
+                    if out_item == "" or out_item == "None" or out_qty <= 0 then return end
+
+                    local ingredients = {}
+                    for i = 1, 5 do
+                        local iid = fstr(ok(function() return data["Material" .. i .. "_Id"] end))
+                        local icount = tonumber(ok(function() return data["Material" .. i .. "_Count"] end)) or 0
+                        if iid ~= "" and iid ~= "None" and icount > 0 then
+                            ingredients[#ingredients + 1] = { item = iid, quantity = icount }
+                        end
+                    end
+
+                    local entry = { output = { item = out_item, quantity = out_qty }, ingredients = ingredients }
+                    local work = tonumber(ok(function() return data.WorkAmount end))
+                    if work then entry.workAmount = work end
+                    local etype = fstr(ok(function() return data.EnergyType end))
+                    local eamt = tonumber(ok(function() return data.EnergyAmount end)) or 0
+                    if eamt > 0 and etype ~= "" and not etype:find("None", 1, true) then
+                        entry.energy = { type = etype, amount = eamt }
+                    end
+                    recipes[rowName] = entry
+                end)
+            end
+        end
+    end
+    return recipes, tables_read, rows_read
+end
+
 --- One-shot reflection dump of a station: every property (name/type/value) up the
 --- class chain + a set of candidate identity/position getters. For wiring the
 --- per-machine id + world position without guessing.

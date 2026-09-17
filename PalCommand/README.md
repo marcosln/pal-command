@@ -40,6 +40,7 @@ PalCommand switches to `native` automatically.
 |---|---|---|
 | `inventory.json` | mod → app | totals + per-base + guild chest |
 | `stations.json` | mod → app | production stations, recipes, current state |
+| `recipes.json` | mod → app | recipe outputs and ingredient quantities, read from Palworld's own recipe DataTable (built once at boot) |
 | `state.json` | mod → app | queue depth, recent placements, backend, errors |
 | `orders.json` | app → mod | list of immediate orders; consumed each cycle |
 | `rules.json` | app → mod | standing rules |
